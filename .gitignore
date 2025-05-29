@@ -1,0 +1,6 @@
+data/*
+checkpoints/*
+preproc/*
+preproc5channel/*
+.cursor-server/*
+wandb/*
