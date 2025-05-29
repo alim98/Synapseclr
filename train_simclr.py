@@ -5,7 +5,7 @@ import torch.distributed as dist
 import torch.multiprocessing as mp
 from torch.utils.data import DataLoader, DistributedSampler
 from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.amp import autocast, GradScaler
+from torch.cuda.amp import autocast, GradScaler
 import argparse
 import time
 from datetime import datetime
@@ -14,11 +14,37 @@ from typing import Dict, List, Tuple, Optional
 import json
 import matplotlib.pyplot as plt
 import wandb
+import contextlib
 
 # Local imports
 from datasets.bbox_loader import BBoxLoader
 from datasets.random_cube import RandomCubeDataset
 from models.simclr3d import SimCLR, nt_xent_loss
+
+# Custom autocast context manager to prevent BatchNorm from using fp16
+# This solves NaN issues when using SyncBatchNorm with small batches
+@contextlib.contextmanager
+def safe_autocast(device_type='cuda', enabled=True):
+    """
+    Custom autocast context manager that forces BatchNorm layers to use float32.
+    Prevents NaN values with small batch sizes when using SyncBatchNorm.
+    """
+    if enabled:
+        # Store original batch norm types
+        orig_bn_fp32 = torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction
+        
+        # Force BN to use fp32
+        torch.backends.cudnn.allow_tf32 = True
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = False
+        
+        with autocast(device_type=device_type):
+            yield
+        
+        # Restore original settings
+        torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = orig_bn_fp32
+    else:
+        yield
 
 
 class LARS(torch.optim.Optimizer):
@@ -137,7 +163,7 @@ def filter_bias_and_bn(model):
     ]
 
 
-def get_optimizer_and_scheduler(model, lr, weight_decay, epochs, steps_per_epoch):
+def get_optimizer_and_scheduler(model, lr, weight_decay, epochs, steps_per_epoch, gradient_accumulation_steps=1):
     """
     Create LARS optimizer and cosine learning rate scheduler.
     
@@ -147,6 +173,7 @@ def get_optimizer_and_scheduler(model, lr, weight_decay, epochs, steps_per_epoch
         weight_decay: Weight decay factor
         epochs: Total number of epochs
         steps_per_epoch: Steps per epoch
+        gradient_accumulation_steps: Number of steps to accumulate gradients
         
     Returns:
         Optimizer, scheduler, and gradient scaler
@@ -164,9 +191,11 @@ def get_optimizer_and_scheduler(model, lr, weight_decay, epochs, steps_per_epoch
     )
     
     # Create cosine scheduler
+    # Adjust steps_per_epoch to account for gradient accumulation
+    effective_steps_per_epoch = steps_per_epoch // gradient_accumulation_steps
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer,
-        T_max=epochs * steps_per_epoch,
+        T_max=epochs * effective_steps_per_epoch,
     )
     
     # Create gradient scaler for mixed precision training
@@ -205,8 +234,8 @@ def train_epoch(model, train_loader, optimizer, scheduler, scaler, device,
         # Move data to device
         view1, view2 = view1.to(device), view2.to(device)
         
-        # Forward pass with mixed precision
-        with autocast(device_type='cuda', enabled=args.mixed_precision):
+        # Forward pass with mixed precision - using safe_autocast to prevent BN issues
+        with safe_autocast(device_type='cuda', enabled=args.mixed_precision):
             # Get projections
             z1 = model(view1)
             z2 = model(view2)
@@ -439,7 +468,8 @@ def main_worker(gpu, args):
         lr=lr,
         weight_decay=args.weight_decay,
         epochs=args.epochs,
-        steps_per_epoch=steps_per_epoch
+        steps_per_epoch=steps_per_epoch,
+        gradient_accumulation_steps=args.gradient_accumulation_steps
     )
     
     # Resume from checkpoint

@@ -171,8 +171,20 @@ class BBoxLoader:
         distances = [np.linalg.norm(np.array(centroid) - np.array(cleft_center_zyx)) 
                     for centroid in component_centroids]
         
-        # Find the component with the minimum distance
-        closest_component_idx = np.argmin(distances) + 1  # +1 because labels start at 1
+        # Check for NaN distances (when centroid is outside the crop)
+        valid_indices = [i for i, d in enumerate(distances) if not np.isnan(d)]
+        
+        # If all distances are NaN (all centroids outside crop), keep all vesicle voxels
+        if len(valid_indices) == 0:
+            print("Warning: All vesicle component centroids are outside crop - keeping all vesicle voxels")
+            return binary_mask
+        
+        # Get valid distances only
+        valid_distances = [distances[i] for i in valid_indices]
+        
+        # Find the valid component with minimum distance
+        min_distance_idx = np.argmin(valid_distances)
+        closest_component_idx = valid_indices[min_distance_idx] + 1  # +1 because labels start at 1
         
         # Create a mask containing only the closest component
         closest_component_mask = (labeled_mask == closest_component_idx)

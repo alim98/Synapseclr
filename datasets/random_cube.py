@@ -65,8 +65,8 @@ class Augmenter:
         # Re-combine channels
         return torch.cat([raw_channel, structure_channels], dim=0)
     
-    def apply_gaussian_blur(self, x: torch.Tensor, sigma_range: Tuple[float, float] = (0.1, 1.5)) -> torch.Tensor:
-        """Apply 3D Gaussian blur to raw channel only."""
+    def apply_gaussian_blur(self, x: torch.Tensor, sigma_range: Tuple[float, float] = (0.1, 1.0)) -> torch.Tensor:
+        """Apply 3D Gaussian blur to raw channel only using separable 3D convolutions."""
         # Only apply to raw channel
         raw_channel = x[0:1]  # Keep dim
         structure_channels = x[1:]
@@ -75,39 +75,64 @@ class Augmenter:
         if torch.rand(1).item() < 0.5:
             return x
         
-        # Sample sigma
+        # Sample sigma - limit maximum sigma to 1.0 to prevent excessive blurring
+        # This helps avoid completely wiping out features like clefts
         sigma = torch.rand(1).item() * (sigma_range[1] - sigma_range[0]) + sigma_range[0]
         
-        # Implement a simple 3D blur using separable 1D operations
-        # since torchvision.transforms.functional.gaussian_blur is for 2D only
+        # For 3D separable Gaussian blur:
+        # 1. Create 1D Gaussian kernels
+        # 2. Apply them sequentially along each dimension
         
-        # Simple approximation using average pooling with stride 1
+        # Create 1D Gaussian kernel
         kernel_size = int(2 * round(2.5 * sigma) + 1)  # Cover ±2.5 sigma
-        kernel_size = max(3, kernel_size)  # At least 3x3x3
-        
+        kernel_size = max(3, kernel_size)  # At least 3
         if kernel_size % 2 == 0:
             kernel_size += 1  # Ensure odd kernel size
         
-        padding = kernel_size // 2
+        # Create 1D Gaussian kernel
+        half_size = kernel_size // 2
+        x_coord = torch.arange(-half_size, half_size + 1, dtype=torch.float32)
+        gaussian_1d = torch.exp(-0.5 * (x_coord / sigma).pow(2))
+        gaussian_1d = gaussian_1d / gaussian_1d.sum()  # Normalize
         
-        # Apply separable blur across each dimension
-        # Process each z-slice separately for 2D blur
-        depth = raw_channel.shape[1]
-        blurred_slices = []
+        # Create separable 3D kernels (one for each dimension)
+        kernel_d = gaussian_1d.view(1, 1, -1, 1, 1)
+        kernel_h = gaussian_1d.view(1, 1, 1, -1, 1)
+        kernel_w = gaussian_1d.view(1, 1, 1, 1, -1)
         
-        for d in range(depth):
-            # Extract slice [1, H, W]
-            slice_2d = raw_channel[:, d:d+1, :, :]
-            # Apply 2D gaussian blur using torchvision
-            blurred_slice = TF.gaussian_blur(
-                slice_2d.squeeze(1),  # Remove depth dimension for 2D blur
-                kernel_size=kernel_size,
-                sigma=sigma
-            )
-            blurred_slices.append(blurred_slice)
+        # Add batch dimension to raw channel for convolution
+        raw_batch = raw_channel.unsqueeze(0)  # [1, 1, D, H, W]
         
-        # Stack blurred slices back together
-        blurred_raw = torch.stack(blurred_slices, dim=1)
+        # Apply separable convolutions
+        # Move tensor to CPU before convolution operations for better performance
+        raw_batch_cpu = raw_batch.cpu()
+        
+        # Apply along depth (D)
+        padding_d = (0, 0, 0, 0, half_size, half_size)
+        blurred = F.conv3d(
+            F.pad(raw_batch_cpu, padding_d, mode='replicate'),
+            kernel_d,
+            padding=0
+        )
+        
+        # Apply along height (H)
+        padding_h = (0, 0, half_size, half_size, 0, 0)
+        blurred = F.conv3d(
+            F.pad(blurred, padding_h, mode='replicate'),
+            kernel_h,
+            padding=0
+        )
+        
+        # Apply along width (W)
+        padding_w = (half_size, half_size, 0, 0, 0, 0)
+        blurred = F.conv3d(
+            F.pad(blurred, padding_w, mode='replicate'),
+            kernel_w,
+            padding=0
+        )
+        
+        # Move back to the same device as input and remove batch dimension
+        blurred_raw = blurred.to(x.device).squeeze(0)
         
         # Combine channels back
         return torch.cat([blurred_raw, structure_channels], dim=0)
@@ -343,13 +368,50 @@ class RandomCubeDataset(Dataset):
         # The cleft mask is in channel 2
         cleft_mask = view[self.cleft_channel]
         
-        # Calculate overlap
-        cleft_volume = cleft_mask.sum()
-        if cleft_volume < 10:  # Too small to be meaningful
+        # Calculate cleft volume in the augmented view
+        cleft_volume_in_view = cleft_mask.sum().item()
+        
+        # Check minimum meaningful size
+        if cleft_volume_in_view < 10:  # Too small to be meaningful
             return False
             
-        # Check what percentage of the cleft mask is preserved
-        return cleft_volume > threshold * self.cube_size**3
+        # Get the original cube's cleft mask
+        # This is important to calculate what fraction of the *original* cleft is preserved
+        # rather than just comparing to the entire cube volume
+        original_cleft_mask = self._get_original_cleft_volume(bbox_name, orig_comp_id)
+        
+        # If we couldn't get the original volume (shouldn't happen), fall back to cube size check
+        if original_cleft_mask is None or original_cleft_mask == 0:
+            return cleft_volume_in_view > 100  # Require at least 100 voxels
+        
+        # Calculate what fraction of the original cleft volume is preserved
+        preservation_ratio = cleft_volume_in_view / original_cleft_mask
+        
+        # Check if enough of the original component is preserved
+        return preservation_ratio > threshold
+
+    def _get_original_cleft_volume(self, bbox_name: str, comp_id: int) -> float:
+        """
+        Get the volume (voxel count) of the original cleft component.
+        
+        Args:
+            bbox_name: Name of the bbox
+            comp_id: Component ID to measure
+            
+        Returns:
+            Volume (number of voxels) of the component
+        """
+        try:
+            # Get the component map for this bbox
+            comp_map = self.cleft_components[bbox_name]
+            
+            # Count voxels in this component
+            component_volume = (comp_map == comp_id).sum().item()
+            
+            return component_volume
+        except Exception as e:
+            print(f"Error calculating component volume: {e}")
+            return 0
     
     def _get_mask_aware_pair(self, max_attempts: int = 10) -> Tuple[torch.Tensor, torch.Tensor]:
         """

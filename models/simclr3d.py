@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import timm
 from typing import Dict, List, Tuple, Optional, Union
+from models.swin3d import AliSwin3D            # NEW – real 3-D Swin
 
 
 class SwinTransformer3D(nn.Module):
@@ -239,9 +240,9 @@ class SimCLR(nn.Module):
         """
         super().__init__()
         
-        # Initialize backbone
+        
         if backbone_type == 'swin3d':
-            self.backbone = SwinTransformer3D(in_channels=in_channels)
+            self.backbone = AliSwin3D(in_channels=in_channels)
         else:
             self.backbone = ResNet3D(in_channels=in_channels)
         
@@ -287,6 +288,7 @@ class SimCLR(nn.Module):
 def nt_xent_loss(z1: torch.Tensor, z2: torch.Tensor, temperature: float = 0.1) -> torch.Tensor:
     """
     Normalized Temperature-scaled Cross Entropy Loss from SimCLR paper.
+    Efficient vectorized implementation without per-row loops.
     
     Args:
         z1: Projected features from first augmentation, shape [batch_size, proj_dim]
@@ -300,8 +302,8 @@ def nt_xent_loss(z1: torch.Tensor, z2: torch.Tensor, temperature: float = 0.1) -
     device = z1.device
     
     # Normalize feature vectors
-    z1 = F.normalize(z1, dim=1)
-    z2 = F.normalize(z2, dim=1)
+    z1 = torch.nn.functional.normalize(z1, dim=1)
+    z2 = torch.nn.functional.normalize(z2, dim=1)
     
     # Concatenate representations: [z1, z2]
     representations = torch.cat([z1, z2], dim=0)
@@ -309,48 +311,37 @@ def nt_xent_loss(z1: torch.Tensor, z2: torch.Tensor, temperature: float = 0.1) -
     # Calculate similarity matrix
     similarity_matrix = torch.matmul(representations, representations.t()) / temperature
     
-    # Create a mask for positive pairs
-    # Each sample in z1 corresponds to the same-index sample in z2
-    # So for index i, the positive pair is (i, i+batch_size)
-    mask = torch.zeros((2 * batch_size, 2 * batch_size), dtype=torch.bool, device=device)
+    # Create labels identifying positive pairs
+    labels = torch.arange(batch_size, device=device)
+    labels = torch.cat([labels + batch_size, labels])
     
-    # Set positive pairs: z1[i] with z2[i]
-    for i in range(batch_size):
-        mask[i, batch_size + i] = True
-        mask[batch_size + i, i] = True
+    # For numerical stability, subtract the max from each row
+    # Exclude the diagonal when computing the max to avoid including self-similarity
+    sim_matrix_no_diag = similarity_matrix.clone()
+    mask_diag = torch.eye(2 * batch_size, device=device, dtype=torch.bool)
+    sim_matrix_no_diag.masked_fill_(mask_diag, float('-inf'))
+    row_max, _ = sim_matrix_no_diag.max(dim=1, keepdim=True)
+    similarity_matrix = similarity_matrix - row_max
     
-    # Remove self-similarities from being considered
-    diag_mask = torch.eye(2 * batch_size, dtype=torch.bool, device=device)
-    mask = mask & (~diag_mask)
+    # Create mask to exclude self-similarity (diagonal)
+    mask = torch.eye(2 * batch_size, device=device, dtype=torch.bool)
     
-    # For each row, create a binary mask for all negatives
-    neg_mask = ~(mask | diag_mask)
+    # Remove self-similarities by setting them to a large negative value (-inf)
+    # This ensures they contribute 0 after exp() in the denominator
+    similarity_matrix = similarity_matrix.masked_fill(mask, float('-inf'))
     
-    # For each sample i, create logits where the positive pair is first, followed by all negatives
-    loss = 0
-    for i in range(2 * batch_size):
-        # Get the positive similarity
-        pos_idx = torch.where(mask[i])[0]
-        if len(pos_idx) != 1:
-            # This should never happen with our setup
-            continue
-            
-        pos_logit = similarity_matrix[i, pos_idx].view(1)
-        
-        # Get negative similarities
-        neg_logits = similarity_matrix[i, neg_mask[i]]
-        
-        # Combine positive and negatives: [pos, neg1, neg2, ...]
-        logits = torch.cat([pos_logit, neg_logits])
-        
-        # Use 0 as target (first element is positive)
-        targets = torch.zeros(1, dtype=torch.long, device=device)
-        
-        # Compute cross entropy and add to total loss
-        loss += F.cross_entropy(logits.unsqueeze(0), targets)
+    # The positive pair for ith sample is at position labels[i]
+    positives = similarity_matrix[torch.arange(2 * batch_size, device=device), labels]
     
-    # Average the loss
-    return loss / (2 * batch_size)
+    # Compute log_prob: log(exp(pos) / (sum of exp over all pairs except self))
+    # Now self-similarity is properly excluded from the denominator
+    denominator = torch.logsumexp(similarity_matrix, dim=1)
+    log_prob = positives - denominator
+    
+    # Calculate the final loss
+    loss = -log_prob.mean()
+    
+    return loss
 
 
 if __name__ == "__main__":
