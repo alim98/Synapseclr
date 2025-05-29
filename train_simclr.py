@@ -398,7 +398,18 @@ def main_worker(gpu, args):
         preproc_dir=args.preproc_dir,
         create_h5=True
     )
-    volumes = loader.process_all_bboxes()
+    
+    # Use memory-efficient loading to avoid OOM errors
+    volumes = loader.process_all_bboxes(memory_efficient=args.memory_efficient)
+    
+    # If memory_efficient is True, volumes contains paths instead of tensors
+    if args.memory_efficient:
+        # Check if volumes contains paths
+        if volumes and isinstance(next(iter(volumes.values())), str):
+            if rank == 0:
+                print("Using memory-efficient loading - loading volumes one by one")
+            # Load volumes from paths
+            volumes = loader.load_from_paths(volumes)
     
     if rank == 0:
         print(f"Loaded {len(volumes)} bbox volumes")
@@ -581,6 +592,8 @@ def main():
                         help='Size of cube to sample (default: 80)')
     parser.add_argument('--cubes_per_bbox', type=int, default=10000,
                         help='Number of cubes to sample per bbox (default: 10000)')
+    parser.add_argument('--memory_efficient', action='store_true',
+                        help='Use memory-efficient data loading to avoid OOM errors')
     
     # Training parameters
     parser.add_argument('--batch_size', type=int, default=64,
@@ -603,7 +616,7 @@ def main():
                         help='Random seed (default: 42)')
     
     # Model parameters
-    parser.add_argument('--backbone', type=str, default='resnet3d',
+    parser.add_argument('--backbone', type=str, default='swin3d',
                         choices=['resnet3d', 'swin3d'],
                         help='Backbone model (default: resnet3d)')
     parser.add_argument('--projector_hidden_dim', type=int, default=2048,

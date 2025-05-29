@@ -4,3 +4,5 @@ preproc/*
 preproc5channel/*
 .cursor-server/*
 wandb/*
+preproc2/*
+models/_pycache/*

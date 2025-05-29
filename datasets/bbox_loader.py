@@ -322,9 +322,13 @@ class BBoxLoader:
         
         return volume_tensor
     
-    def process_all_bboxes(self) -> Dict[str, torch.Tensor]:
+    def process_all_bboxes(self, memory_efficient: bool = False) -> Dict[str, torch.Tensor]:
         """
         Process all bboxes and return a dictionary of tensors.
+        
+        Args:
+            memory_efficient: If True, process one bbox at a time and clear memory between each.
+                              This reduces peak memory usage but might be slower.
         
         Returns:
             Dict mapping bbox_name -> 3-channel tensor
@@ -332,9 +336,57 @@ class BBoxLoader:
         result = {}
         for bbox_name in self.bbox_names:
             print(f"Processing {bbox_name}...")
-            tensor = self.process_bbox(bbox_name)
-            if tensor is not None:
-                result[bbox_name] = tensor
+            try:
+                # Process the current bbox
+                tensor = self.process_bbox(bbox_name)
+                if tensor is not None:
+                    # If memory_efficient is True, store only the path to H5 file instead of keeping tensor in memory
+                    if memory_efficient and self.create_h5:
+                        # Store reference to h5 file path
+                        h5_path = os.path.join(self.preproc_dir, f"{bbox_name}.h5")
+                        if os.path.exists(h5_path):
+                            result[bbox_name] = h5_path
+                            # Free memory by deleting the tensor
+                            del tensor
+                            # Force garbage collection
+                            import gc
+                            gc.collect()
+                            if torch.cuda.is_available():
+                                torch.cuda.empty_cache()
+                            print(f"Stored reference to {bbox_name} H5 file to save memory")
+                        else:
+                            print(f"Warning: H5 file for {bbox_name} not created. Keeping tensor in memory.")
+                            result[bbox_name] = tensor
+                    else:
+                        # Store the tensor directly
+                        result[bbox_name] = tensor
+            except Exception as e:
+                print(f"Error processing {bbox_name}: {e}")
+                # Continue processing other bboxes even if one fails
+                continue
+        
+        return result
+
+    def load_from_paths(self, paths_dict: Dict[str, str]) -> Dict[str, torch.Tensor]:
+        """
+        Load tensors from H5 file paths for memory-efficient loading.
+        
+        Args:
+            paths_dict: Dictionary mapping bbox_name -> h5_file_path
+            
+        Returns:
+            Dictionary mapping bbox_name -> tensor
+        """
+        result = {}
+        for bbox_name, h5_path in paths_dict.items():
+            try:
+                with h5py.File(h5_path, 'r') as f:
+                    tensor = torch.from_numpy(f['volume'][()]).float()
+                    result[bbox_name] = tensor
+                    print(f"Loaded {bbox_name} from H5 file")
+            except Exception as e:
+                print(f"Error loading {bbox_name} from H5 file: {e}")
+        
         return result
 
 

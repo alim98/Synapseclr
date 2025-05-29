@@ -210,6 +210,7 @@ class ProjectionMLP(nn.Module):
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Forward pass through projection head."""
+        # Regular forward pass
         x = self.layer1(x)
         x = self.layer2(x)
         x = self.layer3(x)
@@ -240,9 +241,21 @@ class SimCLR(nn.Module):
         """
         super().__init__()
         
-        
+        # Try to create the requested backbone, with fallback to ResNet3D
         if backbone_type == 'swin3d':
-            self.backbone = AliSwin3D(in_channels=in_channels)
+            print(f"Initializing Swin3D backbone with in_channels={in_channels}")
+            self.backbone = AliSwin3D(
+                in_channels=in_channels,
+                patch_size=(4, 4, 4),
+                window_size=(4, 8, 8),
+                embed_dim=96,
+                depths=(2, 2, 6, 2),
+                num_heads=(3, 6, 12, 24),
+                drop_path_rate=0.1,
+                use_checkpoint=True
+            )
+            print("Successfully initialized Swin3D backbone")
+ 
         else:
             self.backbone = ResNet3D(in_channels=in_channels)
         
@@ -266,7 +279,10 @@ class SimCLR(nn.Module):
         Returns:
             Projected embedding of shape [batch, out_dim]
         """
+        # Get features from backbone
         features = self.backbone(x)
+        
+        # Apply projector
         projections = self.projector(features)
         return projections
     
@@ -332,7 +348,7 @@ def nt_xent_loss(z1: torch.Tensor, z2: torch.Tensor, temperature: float = 0.1) -
     
     # The positive pair for ith sample is at position labels[i]
     positives = similarity_matrix[torch.arange(2 * batch_size, device=device), labels]
-    
+        
     # Compute log_prob: log(exp(pos) / (sum of exp over all pairs except self))
     # Now self-similarity is properly excluded from the denominator
     denominator = torch.logsumexp(similarity_matrix, dim=1)
