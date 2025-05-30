@@ -166,7 +166,7 @@ python eval_embeddings.py --checkpoint checkpoints/checkpoint-best.pt \
 
 ## Expected Results
 
-After 150-200 epochs of training, you should expect:
+After 150-200 epochs of training, we should expect:
 - Silhouette score > 0.15
 - Visible clusters in UMAP visualization
 - Hopkins statistic > 0.6
