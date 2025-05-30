@@ -122,9 +122,10 @@ def extract_embeddings(model: torch.nn.Module, dataset: RandomCubeDataset,
                     cube, _ = dataset._sample_valid_cube(bbox_name)
                     
                     # Check if the cube has significant vesicle content
-                    vesicle_mask = cube[dataset.vesicle_channel]
-                    if torch.sum(vesicle_mask) / torch.numel(vesicle_mask) < mask_overlap_threshold / 10:
-                        continue  # Skip cubes with minimal vesicle content
+                    if hasattr(dataset, 'vesicle_channel'):
+                        vesicle_mask = cube[dataset.vesicle_channel]
+                        if torch.sum(vesicle_mask) / torch.numel(vesicle_mask) < mask_overlap_threshold / 10:
+                            continue  # Skip cubes with minimal vesicle content
                     
                     # Add to batch
                     batch.append(cube)

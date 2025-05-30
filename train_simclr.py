@@ -270,10 +270,17 @@ def train_epoch(model, train_loader, optimizer, scheduler, scaler, device,
             # Log metrics to wandb
             if args.use_wandb and (not dist.is_initialized() or dist.get_rank() == 0):
                 lr = optimizer.param_groups[0]['lr']
+                
+                # Calculate recent average loss from last 10 steps or fewer
+                recent_losses = losses[-10:] if len(losses) >= 10 else losses
+                recent_avg_loss = sum(recent_losses) / len(recent_losses) if recent_losses else 0
+                
                 wandb.log({
                     "train/loss": loss.item() * args.gradient_accumulation_steps,
+                    "train/recent_avg_loss": recent_avg_loss,
                     "train/learning_rate": lr,
                     "train/global_step": global_step,
+                    "train/progress": global_step / (len(train_loader) * args.epochs),
                 }, step=global_step)
             
             # Log progress
@@ -289,9 +296,18 @@ def train_epoch(model, train_loader, optimizer, scheduler, scaler, device,
     
     # Log epoch metrics to wandb
     if args.use_wandb and (not dist.is_initialized() or dist.get_rank() == 0):
+        # Calculate min and max loss for the epoch
+        min_loss = min(losses) if losses else 0
+        max_loss = max(losses) if losses else 0
+        
+        # Log detailed statistics
         wandb.log({
             "train/epoch": epoch,
             "train/avg_loss": avg_loss,
+            "train/min_loss": min_loss,
+            "train/max_loss": max_loss,
+            "train/epoch_progress": (epoch + 1) / args.epochs,
+            "train/completed_steps": global_step,
         }, step=global_step)
     
     return avg_loss, global_step
@@ -384,6 +400,22 @@ def main_worker(gpu, args):
             config=vars(args),
             settings=wandb.Settings(start_method="fork")
         )
+        
+        # Define custom charts for clearer visualization
+        wandb.define_metric("train/loss", summary="min")
+        wandb.define_metric("train/avg_loss", summary="min")
+        wandb.define_metric("train/epoch")
+        wandb.define_metric("train/learning_rate")
+        
+        # Configure default dashboard layout with panels
+        wandb.run.log_code(".")  # Log code snapshot
+        wandb.run.summary.update({
+            "env": {
+                "torch": torch.__version__,
+                "cuda": torch.version.cuda if torch.cuda.is_available() else "N/A",
+                "num_gpus": torch.cuda.device_count() if torch.cuda.is_available() else 0
+            }
+        })
     
     # Set random seed
     torch.manual_seed(args.seed)
@@ -421,7 +453,8 @@ def main_worker(gpu, args):
         bbox_volumes=volumes,
         cubes_per_bbox=args.cubes_per_bbox,
         cube_size=args.cube_size,
-        mask_aware=args.mask_aware
+        mask_aware=args.mask_aware,
+        per_cube_norm=args.per_cube_norm
     )
     
     # Use distributed sampler if needed
@@ -458,7 +491,7 @@ def main_worker(gpu, args):
     
     # Create model
     model = SimCLR(
-        backbone_type=args.backbone,
+        # backbone_type=args.backbone,
         in_channels=3,  # 3 channels for our synapse data
         hidden_dim=args.projector_hidden_dim,
         out_dim=args.projector_output_dim
@@ -520,6 +553,10 @@ def main_worker(gpu, args):
     if rank == 0:
         print(f"Starting training for {args.epochs} epochs")
         
+        # Log training start in wandb
+        if args.use_wandb:
+            wandb.log({"status": "training_started", "total_epochs": args.epochs}, step=global_step)
+        
     for epoch in range(start_epoch, args.epochs):
         # Switch to mask-aware sampling if configured
         if args.mask_aware_after_epoch is not None and epoch >= args.mask_aware_after_epoch:
@@ -556,6 +593,14 @@ def main_worker(gpu, args):
     # Save final model
     if rank == 0:
         print("Training completed, saving final model")
+        
+        # Log training completion in wandb
+        if args.use_wandb:
+            wandb.log({
+                "status": "training_completed", 
+                "final_epoch": args.epochs-1,
+                "total_steps": global_step
+            }, step=global_step)
         
         # Save SimCLR model
         if isinstance(model, DDP):
@@ -594,6 +639,8 @@ def main():
                         help='Number of cubes to sample per bbox (default: 10000)')
     parser.add_argument('--memory_efficient', action='store_true',
                         help='Use memory-efficient data loading to avoid OOM errors')
+    parser.add_argument('--per_cube_norm', action='store_true', default=True,
+                        help='Apply per-cube normalization instead of global normalization (default: True)')
     
     # Training parameters
     parser.add_argument('--batch_size', type=int, default=64,
@@ -616,7 +663,7 @@ def main():
                         help='Random seed (default: 42)')
     
     # Model parameters
-    parser.add_argument('--backbone', type=str, default='swin3d',
+    parser.add_argument('--backbone', type=str, default='res',
                         choices=['resnet3d', 'swin3d'],
                         help='Backbone model (default: resnet3d)')
     parser.add_argument('--projector_hidden_dim', type=int, default=2048,
@@ -625,7 +672,7 @@ def main():
                         help='Projection MLP output dimension (default: 256)')
     
     # Mask-aware parameters
-    parser.add_argument('--mask_aware', action='store_true',
+    parser.add_argument('--mask_aware', action='store_true',default=True,
                         help='Use mask-aware positive sampling')
     parser.add_argument('--mask_aware_after_epoch', type=int, default=None,
                         help='Switch to mask-aware sampling after this epoch')

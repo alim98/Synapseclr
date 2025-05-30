@@ -211,6 +211,12 @@ class RandomCubeDataset(Dataset):
     Dataset that samples random cubes from 3-channel bboxes for contrastive learning.
     
     Each item is a pair of differently augmented views of the same cube.
+    
+    Key features:
+    - Applies per-cube normalization to the raw channel (z-score normalization)
+    - Preserves structure/mask channels without normalization
+    - Supports mask-aware sampling to focus on synaptic structures
+    - Generates two differently augmented views of the same cube for contrastive learning
     """
     
     def __init__(self, 
@@ -220,7 +226,9 @@ class RandomCubeDataset(Dataset):
                  cubes_per_bbox: int = 10000, 
                  cube_size: int = 80,
                  mask_aware: bool = False,
-                 cleft_channel: int = 2):
+                 cleft_channel: int = 2,
+                 vesicle_channel: int = 1,
+                 per_cube_norm: bool = True):
         """
         Initialize the dataset.
         
@@ -232,11 +240,27 @@ class RandomCubeDataset(Dataset):
             cube_size: Size of the cube to sample (default: 80³)
             mask_aware: Whether to ensure cleft overlap in positive pairs
             cleft_channel: Channel index containing cleft masks (default: 2)
+            vesicle_channel: Channel index containing vesicle masks (default: 1)
+            per_cube_norm: Whether to apply per-cube normalization (default: True)
+                           If False, assumes global normalization was applied during preprocessing
+            
+        Note:
+            This implementation applies per-cube normalization to the raw channel (index 0)
+            rather than global normalization. This makes intensity-based augmentations more
+            effective and helps the model focus on local structure rather than global intensity.
         """
         self.cubes_per_bbox = cubes_per_bbox
         self.cube_size = cube_size
         self.mask_aware = mask_aware
         self.cleft_channel = cleft_channel
+        self.vesicle_channel = vesicle_channel
+        self.per_cube_norm = per_cube_norm
+        
+        # Print normalization strategy
+        if self.per_cube_norm:
+            print("Using per-cube normalization for raw channel")
+        else:
+            print("Using global normalization (assumed to be applied during preprocessing)")
         
         # Load data either from provided volumes or from H5 files
         self.volumes = {}
@@ -327,7 +351,39 @@ class RandomCubeDataset(Dataset):
                      h_start:h_start+self.cube_size, 
                      w_start:w_start+self.cube_size]
         
-        # For mask-aware sampling, return the cleft component ID
+        # Apply per-cube normalization to the raw channel (index 0) if enabled
+        if self.per_cube_norm:
+            # Leave structure/mask channels untouched
+            raw_channel = cube[0:1]  # Keep the channel dimension
+            structure_channels = cube[1:]
+            
+            # Calculate mean and std for this specific cube's raw channel
+            mean = torch.mean(raw_channel)
+            std = torch.std(raw_channel)
+            
+            # Log normalization stats occasionally (every 1000 cubes)
+            if torch.rand(1).item() < 0.001:  # 0.1% chance to log
+                # print(f"Per-cube normalization stats - Mean: {mean:.4f}, Std: {std:.4f}")
+                
+                # Log min/max of raw channel before and after normalization
+                raw_min, raw_max = torch.min(raw_channel).item(), torch.max(raw_channel).item()
+                
+                # Apply normalization for logging
+                norm_raw = (raw_channel - mean) / (std + 1e-6)
+                norm_min, norm_max = torch.min(norm_raw).item(), torch.max(norm_raw).item()
+                
+                # print(f"  Raw range: [{raw_min:.4f}, {raw_max:.4f}] → Normalized: [{norm_min:.4f}, {norm_max:.4f}]")
+            
+            # Apply z-score normalization (with epsilon to avoid division by zero)
+            normalized_raw = (raw_channel - mean) / (std + 1e-6)
+            
+            # Combine normalized raw channel with structure channels
+            normalized_cube = torch.cat([normalized_raw, structure_channels], dim=0)
+        else:
+            # Use the cube as is (assumes global normalization was applied during preprocessing)
+            normalized_cube = cube
+        
+        # For mask-aware sampling, get the cleft component ID
         cleft_component_id = None
         if self.mask_aware:
             cleft_components = self.cleft_components[bbox_name]
@@ -345,7 +401,7 @@ class RandomCubeDataset(Dataset):
                 comp_counts = [(comp_region == comp).sum() for comp in unique_comps]
                 cleft_component_id = unique_comps[np.argmax(comp_counts)].item()
         
-        return cube, cleft_component_id
+        return normalized_cube, cleft_component_id
     
     def _check_component_overlap(self, view: torch.Tensor, 
                                orig_comp_id: int, bbox_name: str,
