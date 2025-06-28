@@ -294,7 +294,12 @@ def main_worker(gpu, args):
         if rank == 0:
             print(f"Resuming from checkpoint: {args.resume}")
         try:
-            checkpoint = torch.load(args.resume, map_location=device)
+            # Handle PyTorch version compatibility for checkpoint loading
+            try:
+                checkpoint = torch.load(args.resume, map_location=device, weights_only=False)
+            except TypeError:
+                # Fallback for older PyTorch versions
+                checkpoint = torch.load(args.resume, map_location=device)
             
             if isinstance(model, DDP):
                 model.module.load_state_dict(checkpoint['model_state_dict'])
