@@ -8,3 +8,5 @@ preproc2/*
 models/_pycache/*
 notes.md
 datareal/*
+tensorboard_logs/*
+preproc_synapses/*

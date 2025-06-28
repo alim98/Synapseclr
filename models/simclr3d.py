@@ -36,9 +36,9 @@ class ProjectionMLP(nn.Module):
 
 
 class SimCLR(nn.Module):
-    def __init__(self, in_channels: int = 3, hidden_dim: int = 2048, out_dim: int = 256):
+    def __init__(self, in_channels: int = 3, hidden_dim: int = 2048, out_dim: int = 256, pretrained: bool = False):
         super().__init__()
-        self.backbone = ResNet3D(in_channels)
+        self.backbone = ResNet3D(in_channels, pretrained=pretrained)
         self.projector = ProjectionMLP(self.backbone.out_dim, hidden_dim, out_dim)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:

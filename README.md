@@ -4,48 +4,46 @@ This project implements SimCLR self-supervised learning for 3D electron microsco
 
 ## Project Overview
 
-This pipeline processes labeled 3D EM data of synapses, with the following workflow:
+This pipeline processes labeled 3D EM data of synapses with two different approaches:
 
-1. **Preprocessing**: Standardize multiple input sources (raw EM, segmentation, additional masks) into 3-channel volumes.
-2. **Dynamic Sampling**: Extract random 80³ cubes from the volumes.
-3. **Augmentation**: Apply two different augmentation streams to create positive pairs.
-4. **Contrastive Learning**: Use a SimCLR approach with NT-Xent loss.
-5. **Evaluation**: Assess embedding quality using silhouette score and UMAP visualization.
+1. **Synapse-Based Training (Recommended)**: Extracts individual synapses based on Excel coordinate annotations
+2. **BBox-Based Training**: Processes entire bounding box volumes and randomly samples cubes
+
+### Synapse-Based Approach (New)
+
+This approach extracts specific synapses using coordinates from Excel files:
+
+1. **Coordinate Loading**: Read synapse coordinates (central, side1, side2) from Excel files
+2. **Vesicle Analysis**: Determine presynaptic side based on vesicle cloud overlap
+3. **Cube Extraction**: Extract 80³ cubes centered on synaptic clefts
+4. **Contrastive Learning**: Train SimCLR on individual synapse instances
+
+### BBox-Based Approach (Original)
+
+The original approach processes entire bounding box volumes:
+
+1. **Preprocessing**: Standardize multiple input sources into 3-channel volumes
+2. **Dynamic Sampling**: Extract random 80³ cubes from volumes
+3. **Augmentation**: Apply augmentation streams to create positive pairs
+4. **Contrastive Learning**: Use SimCLR with NT-Xent loss
 
 ## Input Data Structure
-
-The model processes 3D electron microscopy data of synapses with the following characteristics:
 
 ### Raw Input Files
 - **Raw EM Data**: Grayscale TIFF slices showing cellular ultrastructure
 - **Segmentation Masks**: Instance segmentation masks as TIFF slices
-- **Additional Masks**: Semantic segmentation masks for specific cellular structures
-- **Coordinate Files**: Excel files with coordinates for synaptic cleft centers and sides
+- **Additional Masks**: Semantic segmentation masks for cellular structures
+- **Coordinate Files**: Excel files with synapse coordinates:
+  - `Var1`: Synapse identifier
+  - `central_coord_1/2/3`: Cleft center coordinates (x, y, z)
+  - `side_1_coord_1/2/3`: First synaptic partner coordinates
+  - `side_2_coord_1/2/3`: Second synaptic partner coordinates
 
 ### Preprocessed 3-Channel Format
-Each volume is converted to a standardized 3-channel tensor:
+Each volume/cube is converted to a standardized 3-channel tensor:
 1. **Channel 0**: Raw EM intensity (normalized)
-2. **Channel 1**: Pre-synaptic mask (derived from segmentation)
+2. **Channel 1**: Pre-synaptic mask (determined by vesicle overlap)
 3. **Channel 2**: Cleft mask (from additional masks)
-
-### Training Inputs
-During training, the model receives:
-- **Positive Pairs**: Two different augmentations of the same 80³ cube
-  - **View A**: Global transformations (rotations, intensity jitter, blur)
-  - **View B**: Global + local transformations (crop-resize, mask dropout)
-- **Mask-Aware Sampling**: "SegCLR trick" ensures positive pairs share the same biological structures by:
-  - Sampling cubes that overlap with the same cleft components
-  - Verifying both augmented views preserve sufficient cleft structure
-
-Each bbox volume has shape `[3, 575, 575, 575]`, containing 7 different synapses that are processed into the standardized format.
-
-## Main Features
-
-- Process raw EM data, segmentation masks, and additional mask data into structured 3-channel tensors
-- Support for mask-aware contrastive learning that leverages biological structures
-- Efficient implementation with mixed precision, gradient accumulation, and distributed training
-- Comprehensive evaluation tools for assessing embedding quality without labeled data
-- Flexible architecture with ResNet3D or Swin-Transformer3D backbone options
 
 ## Directory Structure
 
@@ -53,9 +51,13 @@ Each bbox volume has shape `[3, 575, 575, 575]`, containing 7 different synapses
 .
 ├── datasets/
 │   ├── bbox_loader.py         # Load and preprocess bbox volumes
+│   ├── synapse_loader.py      # Extract individual synapses from Excel
+│   ├── synapse_dataset.py     # Dataset for individual synapses
 │   └── random_cube.py         # Random cube sampling and augmentation
 ├── models/
-│   └── simclr3d.py            # SimCLR model architecture and loss
+│   └── simclr.py              # SimCLR model architecture and loss
+├── utils/
+│   └── training_utils.py      # Training utilities
 ├── data/                      # Input data directory
 │   ├── raw/                   # Raw EM data
 │   │   └── bbox{1-7}/         # Raw TIFF slices for each bbox
@@ -64,10 +66,13 @@ Each bbox volume has shape `[3, 575, 575, 575]`, containing 7 different synapses
 │   ├── bbox_{1-7}/            # Additional mask data
 │   │   └── slice_*.tif        # Masks for vesicles, clefts, mitochondria
 │   └── bbox{1-7}.xlsx         # Coordinate information for each bbox
-├── preproc/                   # Preprocessed data (H5 files)
+├── preproc/                   # Preprocessed bbox data (H5 files)
+├── preproc_synapses/          # Preprocessed synapse cubes (H5 files)
 ├── checkpoints/               # Model checkpoints
-├── eval_results/              # Evaluation results
-├── train_simclr.py            # Main training script
+├── tensorboard_logs/          # TensorBoard logs (organized by run)
+├── train_simclr.py            # Main training script (bbox-based)
+├── train_synapse_simclr.py    # Synapse-based training script
+├── test_synapse_extraction.py # Test synapse extraction
 ├── eval_embeddings.py         # Embedding evaluation script
 └── requirements.txt           # Dependencies
 ```
@@ -89,89 +94,121 @@ Each bbox volume has shape `[3, 575, 575, 575]`, containing 7 different synapses
 
 ## Usage
 
+### Synapse-Based Training (Recommended)
+
+This approach extracts individual synapses based on Excel coordinates:
+
+```bash
+# Step 1: Test synapse extraction first
+python test_synapse_extraction.py --data_dir data --cube_size 80
+
+# Step 2: Preprocess synapses and save to H5 files (optional but recommended)
+python preprocess_synapses.py --data_dir data --preproc_dir preproc_synapses --cube_size 80
+
+# Step 3: Train SimCLR on individual synapses
+python train_synapse_simclr.py --data_dir data --epochs 200 --batch_size 32 --cube_size 80
+
+# With mixed precision for faster training
+python train_synapse_simclr.py --data_dir data --epochs 200 --batch_size 32 --mixed_precision
+
+# With memory efficient loading (uses H5 files automatically)
+python train_synapse_simclr.py --data_dir data --epochs 200 --batch_size 32 --memory_efficient
+
+# With custom run name for TensorBoard
+python train_synapse_simclr.py --data_dir data --epochs 200 --batch_size 32 --run_name my_experiment
+```
+
+### BBox-Based Training (Original)
+
+Train SimCLR on entire bbox volumes:
+
+```bash
+# Basic training
+python train_simclr.py --data_dir data --epochs 200 --batch_size 64
+
+# Advanced training with mask-aware sampling
+python train_simclr.py --data_dir data --batch_size 32 --epochs 200 \
+  --gradient_accumulation_steps 4 --mixed_precision \
+  --mask_aware_after_epoch 100
+
+# Multi-GPU training
+python train_simclr.py --distributed --batch_size 32 \
+  --gradient_accumulation_steps 2 --mixed_precision
+```
+
+### TensorBoard Monitoring
+
+View training progress:
+```bash
+tensorboard --logdir tensorboard_logs
+```
+
+Each run creates a separate directory:
+- `tensorboard_logs/my_experiment_20231215_143022/`
+- `tensorboard_logs/synapse_simclr_20231215_144501/` (default naming)
+
 ### Data Preparation
 
 The code expects the following data structure:
 - `data/raw/bbox{1-7}/` - Raw EM data TIFF slices
 - `data/seg/bbox{1-7}/` - Segmentation mask TIFF slices
 - `data/bbox_{1-7}/` - Additional mask TIFF slices (vesicle, cleft, mitochondria)
-- `data/bbox{1-7}.xlsx` - Excel files with coordinate information
-
-### Preprocessing
-
-Preprocessing happens automatically during training or evaluation, but you can run it separately:
-
-```bash
-python -c "from datasets.bbox_loader import BBoxLoader; BBoxLoader().process_all_bboxes()"
-```
-
-### Training
-
-Basic training:
-```bash
-python train_simclr.py --data_dir data --preproc_dir preproc --batch_size 64 --epochs 200
-```
-
-Advanced training with mask-aware sampling:
-```bash
-python train_simclr.py --data_dir data --preproc_dir preproc \
-  --backbone resnet3d --batch_size 32 --epochs 200 \
-  --gradient_accumulation_steps 4 --mixed_precision \
-  --mask_aware_after_epoch 100
-```
-
-Multi-GPU training:
-```bash
-python train_simclr.py --distributed --gpus_per_node 4 --batch_size 32 \
-  --gradient_accumulation_steps 2 --mixed_precision
-```
-
-With Weights & Biases tracking:
-```bash
-python train_simclr.py --use_wandb --wandb_project simclr-3d-synapse \
-  --batch_size 32 --mixed_precision --mask_aware
-```
+- `data/bbox{1-7}.xlsx` - Excel files with synapse coordinate information
 
 ### Evaluation
 
 Evaluate embeddings quality:
 ```bash
-python eval_embeddings.py --checkpoint checkpoints/checkpoint-best.pt \
+python eval_embeddings.py --checkpoint checkpoints/checkpoint_best.pt \
   --data_dir data --preproc_dir preproc --output_dir eval_results
 ```
 
-## Arguments
+## Key Arguments
 
-### Training Arguments
+### Synapse-Based Training Arguments
 
 - `--data_dir`: Directory with raw data (default: "data")
-- `--preproc_dir`: Directory for preprocessed data (default: "preproc")
-- `--batch_size`: Batch size per GPU (default: 64)
+- `--preproc_dir`: Directory for preprocessed synapse cubes (default: "preproc_synapses")
+- `--cube_size`: Size of synapse cubes to extract (default: 80)
+- `--batch_size`: Batch size per GPU (default: 32)
 - `--epochs`: Number of training epochs (default: 200)
-- `--backbone`: Backbone model (choices: "resnet3d", "swin3d", default: "resnet3d")
 - `--mixed_precision`: Use mixed precision training
-- `--gradient_accumulation_steps`: Number of steps to accumulate gradients
+- `--run_name`: Name for this training run
+
+### BBox-Based Training Arguments
+
+- `--data_dir`: Directory with raw data (default: "data")
+- `--preproc_dir`: Directory for preprocessed bbox data (default: "preproc")
+- `--cubes_per_bbox`: Number of cubes to sample per bbox (default: 10)
+- `--cube_size`: Size of cubes to sample (default: 80)
 - `--mask_aware`: Use mask-aware positive sampling
 - `--mask_aware_after_epoch`: Switch to mask-aware sampling after this epoch
-- `--distributed`: Use distributed training
-- `--use_wandb`: Use Weights & Biases for logging
-- `--wandb_project`: Wandb project name (default: "simclr-3d-synapse")
-- `--wandb_run_name`: Wandb run name (default: auto-generated)
 
-### Evaluation Arguments
+## Model Architecture
 
-- `--checkpoint`: Path to model checkpoint
-- `--max_samples`: Maximum number of samples to evaluate
-- `--n_clusters`: Number of clusters for K-means
+- **Backbone**: ResNet3D-50 adapted for 3D EM data
+- **Input**: 3-channel 80³ cubes
+- **Contrastive Loss**: NT-Xent (Normalized Temperature-scaled Cross Entropy)
+- **Temperature**: 0.07 (default)
+- **Projector**: MLP with hidden dimension 512, output dimension 128
 
 ## Expected Results
 
-After 150-200 epochs of training, we should expect:
+After 150-200 epochs of training:
+- **Synapse-based**: Better representation of individual synaptic structures
+- **BBox-based**: Good general representations but may conflate different synapses
 - Silhouette score > 0.15
 - Visible clusters in UMAP visualization
 - Hopkins statistic > 0.6
 
+## Advantages of Synapse-Based Approach
+
+1. **Biological Relevance**: Learns representations of individual synapses rather than arbitrary cube regions
+2. **Precise Localization**: Uses expert-annotated coordinates for accurate synapse centering
+3. **Consistent Structure**: Each training sample contains a complete synaptic structure
+4. **Better Evaluation**: More meaningful for downstream synaptic analysis tasks
+
 ## References
 
 - Chen, T., Kornblith, S., Norouzi, M., & Hinton, G. (2020). A Simple Framework for Contrastive Learning of Visual Representations. ICML 2020.
-- Lu, Y., Koohababni, N.A., et al. (2022). Self-supervised learning with masked image modeling for instance segmentation and classification in electron microscopy. Nature Machine Intelligence. # Synapseclr
+- Lu, Y., Koohababni, N.A., et al. (2022). Self-supervised learning with masked image modeling for instance segmentation and classification in electron microscopy. Nature Machine Intelligence.

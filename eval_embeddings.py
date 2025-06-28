@@ -281,8 +281,7 @@ def main():
     parser.add_argument('--checkpoint', type=str, required=True,
                         help='Path to model checkpoint')
     parser.add_argument('--backbone', type=str, default='resnet3d',
-                        choices=['resnet3d', 'swin3d'],
-                        help='Backbone model (default: resnet3d)')
+                        help='Backbone model (only resnet3d supported)')
     parser.add_argument('--cube_size', type=int, default=80,
                         help='Size of cube to sample (default: 80)')
     
@@ -309,7 +308,7 @@ def main():
     
     # Load model
     print(f"Loading model from {args.checkpoint}...")
-    model = SimCLR(backbone_type=args.backbone)
+    model = SimCLR(in_channels=3)
     
     checkpoint = torch.load(args.checkpoint, map_location=device)
     

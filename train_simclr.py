@@ -13,115 +13,13 @@ import numpy as np
 from typing import Dict, List, Tuple, Optional
 import json
 import matplotlib.pyplot as plt
-import wandb
-import contextlib
+from torch.utils.tensorboard import SummaryWriter
 
 # Local imports
 from datasets.bbox_loader import BBoxLoader
 from datasets.random_cube import RandomCubeDataset
 from models.simclr3d import SimCLR, nt_xent_loss
-
-# Custom autocast context manager to prevent BatchNorm from using fp16
-# This solves NaN issues when using SyncBatchNorm with small batches
-@contextlib.contextmanager
-def safe_autocast(device_type='cuda', enabled=True):
-    """
-    Custom autocast context manager that forces BatchNorm layers to use float32.
-    Prevents NaN values with small batch sizes when using SyncBatchNorm.
-    """
-    if enabled:
-        # Store original batch norm types
-        orig_bn_fp32 = torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction
-        
-        # Force BN to use fp32
-        torch.backends.cudnn.allow_tf32 = True
-        torch.backends.cuda.matmul.allow_tf32 = True
-        torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = False
-        
-        with autocast(device_type=device_type):
-            yield
-        
-        # Restore original settings
-        torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = orig_bn_fp32
-    else:
-        yield
-
-
-class LARS(torch.optim.Optimizer):
-    """
-    Layer-wise Adaptive Rate Scaling for large batch training.
-    See: https://arxiv.org/abs/1708.03888
-    
-    Adapted from:
-    https://github.com/noahgolmant/pytorch-lars/blob/master/lars.py
-    """
-    def __init__(self, params, lr=0.001, weight_decay=0.0, momentum=0.9, eta=0.001,
-                 weight_decay_filter=None, lars_adaptation_filter=None):
-        """
-        Args:
-            params: Model parameters
-            lr: Initial learning rate
-            weight_decay: Weight decay for regularization
-            momentum: Momentum coefficient
-            eta: LARS coefficient
-            weight_decay_filter: Function to filter parameters for weight decay
-            lars_adaptation_filter: Function to filter parameters for LARS adaptation
-        """
-        defaults = dict(
-            lr=lr,
-            weight_decay=weight_decay,
-            momentum=momentum,
-            eta=eta,
-            weight_decay_filter=weight_decay_filter,
-            lars_adaptation_filter=lars_adaptation_filter
-        )
-        super().__init__(params, defaults)
-    
-    @torch.no_grad()
-    def step(self):
-        """Performs a single optimization step."""
-        for group in self.param_groups:
-            weight_decay = group['weight_decay']
-            momentum = group['momentum']
-            eta = group['eta']
-            weight_decay_filter = group['weight_decay_filter']
-            lars_adaptation_filter = group['lars_adaptation_filter']
-            
-            for p in group['params']:
-                if p.grad is None:
-                    continue
-                
-                param_state = self.state[p]
-                d_p = p.grad
-                
-                # Weight decay
-                if weight_decay != 0 and (weight_decay_filter is None or weight_decay_filter(p)):
-                    d_p = d_p.add(p, alpha=weight_decay)
-                
-                # LARS adaptation
-                if lars_adaptation_filter is None or lars_adaptation_filter(p):
-                    param_norm = torch.norm(p)
-                    update_norm = torch.norm(d_p)
-                    
-                    # Avoid division by zero
-                    if param_norm != 0 and update_norm != 0:
-                        # Compute local learning rate
-                        local_lr = eta * param_norm / update_norm
-                        # Apply local learning rate
-                        d_p = d_p.mul(local_lr)
-                
-                # Momentum
-                if momentum != 0:
-                    if 'momentum_buffer' not in param_state:
-                        buf = param_state['momentum_buffer'] = torch.clone(d_p).detach()
-                    else:
-                        buf = param_state['momentum_buffer']
-                        buf.mul_(momentum).add_(d_p)
-                    d_p = buf
-                
-                # Update parameter
-                p.add_(d_p, alpha=-group['lr'])
-
+from utils.training_utils import safe_autocast, LARS, filter_bias_and_bn, get_optimizer_and_scheduler
 
 def setup_distributed():
     """Setup distributed training."""
@@ -143,69 +41,8 @@ def setup_distributed():
         return 0, 1, device
 
 
-def filter_bias_and_bn(model):
-    """Get parameter groups for optimizer to exclude BN and bias from weight decay."""
-    decay = []
-    no_decay = []
-    for name, param in model.named_parameters():
-        if not param.requires_grad:
-            continue
-        
-        # Skip BN and bias parameters for weight decay
-        if len(param.shape) == 1 or name.endswith(".bias"):
-            no_decay.append(param)
-        else:
-            decay.append(param)
-            
-    return [
-        {'params': no_decay, 'weight_decay': 0.0},
-        {'params': decay}
-    ]
-
-
-def get_optimizer_and_scheduler(model, lr, weight_decay, epochs, steps_per_epoch, gradient_accumulation_steps=1):
-    """
-    Create LARS optimizer and cosine learning rate scheduler.
-    
-    Args:
-        model: SimCLR model
-        lr: Learning rate
-        weight_decay: Weight decay factor
-        epochs: Total number of epochs
-        steps_per_epoch: Steps per epoch
-        gradient_accumulation_steps: Number of steps to accumulate gradients
-        
-    Returns:
-        Optimizer, scheduler, and gradient scaler
-    """
-    # Filter parameters for weight decay
-    param_groups = filter_bias_and_bn(model)
-    
-    # Create LARS optimizer
-    optimizer = LARS(
-        param_groups,
-        lr=lr,
-        weight_decay=weight_decay,
-        momentum=0.9,
-        eta=0.001
-    )
-    
-    # Create cosine scheduler
-    # Adjust steps_per_epoch to account for gradient accumulation
-    effective_steps_per_epoch = steps_per_epoch // gradient_accumulation_steps
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer,
-        T_max=epochs * effective_steps_per_epoch,
-    )
-    
-    # Create gradient scaler for mixed precision training
-    scaler = GradScaler()
-    
-    return optimizer, scheduler, scaler
-
-
 def train_epoch(model, train_loader, optimizer, scheduler, scaler, device, 
-                epoch, args, global_step=0):
+                epoch, args, global_step=0, writer=None):
     """
     Train for one epoch.
     
@@ -267,21 +104,18 @@ def train_epoch(model, train_loader, optimizer, scheduler, scaler, device,
             
             global_step += 1
             
-            # Log metrics to wandb
-            if args.use_wandb and (not dist.is_initialized() or dist.get_rank() == 0):
+            # Log metrics to tensorboard
+            if writer and (not dist.is_initialized() or dist.get_rank() == 0):
                 lr = optimizer.param_groups[0]['lr']
                 
                 # Calculate recent average loss from last 10 steps or fewer
                 recent_losses = losses[-10:] if len(losses) >= 10 else losses
                 recent_avg_loss = sum(recent_losses) / len(recent_losses) if recent_losses else 0
                 
-                wandb.log({
-                    "train/loss": loss.item() * args.gradient_accumulation_steps,
-                    "train/recent_avg_loss": recent_avg_loss,
-                    "train/learning_rate": lr,
-                    "train/global_step": global_step,
-                    "train/progress": global_step / (len(train_loader) * args.epochs),
-                }, step=global_step)
+                writer.add_scalar("train/loss", loss.item() * args.gradient_accumulation_steps, global_step)
+                writer.add_scalar("train/recent_avg_loss", recent_avg_loss, global_step)
+                writer.add_scalar("train/learning_rate", lr, global_step)
+                writer.add_scalar("train/progress", global_step / (len(train_loader) * args.epochs), global_step)
             
             # Log progress
             if step % args.log_every_n_steps == 0:
@@ -294,21 +128,18 @@ def train_epoch(model, train_loader, optimizer, scheduler, scaler, device,
     # Calculate average loss for the epoch
     avg_loss = sum(losses) / len(losses) if losses else 0
     
-    # Log epoch metrics to wandb
-    if args.use_wandb and (not dist.is_initialized() or dist.get_rank() == 0):
+    # Log epoch metrics to tensorboard
+    if writer and (not dist.is_initialized() or dist.get_rank() == 0):
         # Calculate min and max loss for the epoch
         min_loss = min(losses) if losses else 0
         max_loss = max(losses) if losses else 0
         
         # Log detailed statistics
-        wandb.log({
-            "train/epoch": epoch,
-            "train/avg_loss": avg_loss,
-            "train/min_loss": min_loss,
-            "train/max_loss": max_loss,
-            "train/epoch_progress": (epoch + 1) / args.epochs,
-            "train/completed_steps": global_step,
-        }, step=global_step)
+        writer.add_scalar("train/epoch", epoch, global_step)
+        writer.add_scalar("train/avg_loss", avg_loss, global_step)
+        writer.add_scalar("train/min_loss", min_loss, global_step)
+        writer.add_scalar("train/max_loss", max_loss, global_step)
+        writer.add_scalar("train/epoch_progress", (epoch + 1) / args.epochs, global_step)
     
     return avg_loss, global_step
 
@@ -367,12 +198,6 @@ def save_checkpoint(model, optimizer, scheduler, scaler, epoch, global_step,
             torch.save(checkpoint, best_checkpoint_path)
             
         print(f"Saved checkpoint at epoch {epoch}")
-        
-        # Log checkpoint to wandb
-        if args.use_wandb and epoch % args.save_every_n_epochs == 0:
-            wandb.save(epoch_checkpoint_path)
-            if is_best:
-                wandb.save(best_checkpoint_path)
 
 
 def main_worker(gpu, args):
@@ -392,30 +217,45 @@ def main_worker(gpu, args):
         rank = 0
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
-    # Initialize wandb on rank 0 only
-    if args.use_wandb and (not args.distributed or rank == 0):
-        wandb.init(
-            project=args.wandb_project,
-            name=args.wandb_run_name or f"simclr3d-{datetime.now().strftime('%Y%m%d-%H%M%S')}",
-            config=vars(args),
-            settings=wandb.Settings(start_method="fork")
-        )
+    # Initialize tensorboard writer on rank 0 only
+    writer = None
+    if rank == 0:
+        # Create unique log directory for this run
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        if args.run_name:
+            run_dir = f"{args.run_name}_{timestamp}"
+        else:
+            run_dir = f"run_{timestamp}"
         
-        # Define custom charts for clearer visualization
-        wandb.define_metric("train/loss", summary="min")
-        wandb.define_metric("train/avg_loss", summary="min")
-        wandb.define_metric("train/epoch")
-        wandb.define_metric("train/learning_rate")
+        log_dir = os.path.join(args.checkpoint_dir, 'tensorboard_logs', run_dir)
+        writer = SummaryWriter(log_dir=log_dir)
+        print(f"Tensorboard logs will be saved to: {log_dir}")
+        print(f"View with: tensorboard --logdir {os.path.join(args.checkpoint_dir, 'tensorboard_logs')}")
         
-        # Configure default dashboard layout with panels
-        wandb.run.log_code(".")  # Log code snapshot
-        wandb.run.summary.update({
-            "env": {
-                "torch": torch.__version__,
-                "cuda": torch.version.cuda if torch.cuda.is_available() else "N/A",
-                "num_gpus": torch.cuda.device_count() if torch.cuda.is_available() else 0
-            }
-        })
+        # Log environment info
+        writer.add_text("Environment/PyTorch_Version", torch.__version__)
+        if torch.cuda.is_available():
+            writer.add_text("Environment/CUDA_Version", torch.version.cuda)
+            writer.add_scalar("Environment/Num_GPUs", torch.cuda.device_count())
+        
+        # Log hyperparameters
+        hparams = {
+            'batch_size': args.batch_size,
+            'weight_decay': args.weight_decay,
+            'temperature': args.temperature,
+            'epochs': args.epochs,
+            'cube_size': args.cube_size,
+            'mask_aware': args.mask_aware,
+            'mixed_precision': args.mixed_precision,
+            'gradient_accumulation_steps': args.gradient_accumulation_steps,
+        }
+        
+        # Log hyperparameters as scalars
+        for key, value in hparams.items():
+            if isinstance(value, (int, float)):
+                writer.add_scalar(f"Hyperparameters/{key}", value)
+            else:
+                writer.add_text(f"Hyperparameters/{key}", str(value))
     
     # Set random seed
     torch.manual_seed(args.seed)
@@ -436,12 +276,21 @@ def main_worker(gpu, args):
     
     # If memory_efficient is True, volumes contains paths instead of tensors
     if args.memory_efficient:
-        # Check if volumes contains paths
+        # Check if volumes contains paths (string paths instead of tensors)
         if volumes and isinstance(next(iter(volumes.values())), str):
             if rank == 0:
-                print("Using memory-efficient loading - loading volumes one by one")
-            # Load volumes from paths
+                print("Using memory-efficient loading - volumes stored as H5 file paths")
+                print("Loading volumes from H5 files now...")
+            # Load volumes from paths - this ensures all volumes are properly loaded as tensors
             volumes = loader.load_from_paths(volumes)
+            
+            # Verify all volumes loaded successfully
+            failed_loads = [name for name, vol in volumes.items() if vol is None]
+            if failed_loads:
+                raise RuntimeError(f"Failed to load volumes: {failed_loads}")
+                
+            if rank == 0:
+                print("Successfully loaded all volumes from H5 files")
     
     if rank == 0:
         print(f"Loaded {len(volumes)} bbox volumes")
@@ -545,17 +394,9 @@ def main_worker(gpu, args):
         if 'avg_loss' in checkpoint:
             best_loss = checkpoint['avg_loss']
     
-    # Log model summary to wandb
-    if args.use_wandb and (not dist.is_initialized() or dist.get_rank() == 0):
-        wandb.watch(model, log="all", log_freq=100)
-    
     # Training loop
     if rank == 0:
         print(f"Starting training for {args.epochs} epochs")
-        
-        # Log training start in wandb
-        if args.use_wandb:
-            wandb.log({"status": "training_started", "total_epochs": args.epochs}, step=global_step)
         
     for epoch in range(start_epoch, args.epochs):
         # Switch to mask-aware sampling if configured
@@ -563,14 +404,12 @@ def main_worker(gpu, args):
             dataset.mask_aware = True
             if rank == 0:
                 print(f"Switched to mask-aware sampling at epoch {epoch}")
-                if args.use_wandb:
-                    wandb.log({"train/mask_aware": True}, step=global_step)
         
         # Train for one epoch
         start_time = time.time()
         avg_loss, global_step = train_epoch(
             model, train_loader, optimizer, scheduler, scaler,
-            device, epoch, args, global_step
+            device, epoch, args, global_step, writer
         )
         epoch_time = time.time() - start_time
         
@@ -582,9 +421,7 @@ def main_worker(gpu, args):
             is_best = avg_loss < best_loss
             if is_best:
                 best_loss = avg_loss
-                if args.use_wandb:
-                    wandb.run.summary["best_loss"] = best_loss
-                
+            
             save_checkpoint(
                 model, optimizer, scheduler, scaler,
                 epoch, global_step, avg_loss, args, is_best
@@ -593,14 +430,6 @@ def main_worker(gpu, args):
     # Save final model
     if rank == 0:
         print("Training completed, saving final model")
-        
-        # Log training completion in wandb
-        if args.use_wandb:
-            wandb.log({
-                "status": "training_completed", 
-                "final_epoch": args.epochs-1,
-                "total_steps": global_step
-            }, step=global_step)
         
         # Save SimCLR model
         if isinstance(model, DDP):
@@ -618,18 +447,16 @@ def main_worker(gpu, args):
             torch.save(model.backbone.state_dict(), 
                       os.path.join(args.checkpoint_dir, "backbone_final.pt"))
         
-        # Log final model to wandb
-        if args.use_wandb:
-            wandb.save(os.path.join(args.checkpoint_dir, "simclr_final.pt"))
-            wandb.save(os.path.join(args.checkpoint_dir, "backbone_final.pt"))
-            wandb.finish()
+        # Close tensorboard writer
+        if writer:
+            writer.close()
 
 
 def main():
     parser = argparse.ArgumentParser(description='Train SimCLR on synapse data')
     
     # Data parameters
-    parser.add_argument('--data_dir', type=str, default='data',
+    parser.add_argument('--data_dir', type=str, default='datareal',
                         help='Directory containing raw data')
     parser.add_argument('--preproc_dir', type=str, default='preproc',
                         help='Directory to store preprocessed data')
@@ -639,13 +466,14 @@ def main():
                         help='Number of cubes to sample per bbox (default: 10000)')
     parser.add_argument('--memory_efficient', action='store_true',
                         help='Use memory-efficient data loading to avoid OOM errors')
-    parser.add_argument('--per_cube_norm', action='store_true', default=True,
-                        help='Apply per-cube normalization instead of global normalization (default: True)')
+    parser.add_argument('--no_per_cube_norm', action='store_true',
+                        help='Disable per-cube normalization (use global normalization instead)')
+    # For backwards compatibility, we'll handle this in the args processing
     
     # Training parameters
     parser.add_argument('--batch_size', type=int, default=64,
                         help='Batch size per GPU (default: 64)')
-    parser.add_argument('--epochs', type=int, default=1,
+    parser.add_argument('--epochs', type=int, default=200,
                         help='Number of training epochs (default: 200)')
     parser.add_argument('--base_lr', type=float, default=0.001,
                         help='Base learning rate (default: 0.001)')
@@ -663,16 +491,15 @@ def main():
                         help='Random seed (default: 42)')
     
     # Model parameters
-    parser.add_argument('--backbone', type=str, default='res',
-                        choices=['resnet3d', 'swin3d'],
-                        help='Backbone model (default: resnet3d)')
+    parser.add_argument('--backbone', type=str, default='resnet3d',
+                        help='Backbone model (only resnet3d supported)')
     parser.add_argument('--projector_hidden_dim', type=int, default=2048,
                         help='Projection MLP hidden dimension (default: 2048)')
     parser.add_argument('--projector_output_dim', type=int, default=256,
                         help='Projection MLP output dimension (default: 256)')
     
     # Mask-aware parameters
-    parser.add_argument('--mask_aware', action='store_true',default=True,
+    parser.add_argument('--mask_aware', action='store_true',
                         help='Use mask-aware positive sampling')
     parser.add_argument('--mask_aware_after_epoch', type=int, default=None,
                         help='Switch to mask-aware sampling after this epoch')
@@ -686,14 +513,8 @@ def main():
                         help='Resume from checkpoint')
     parser.add_argument('--log_every_n_steps', type=int, default=10,
                         help='Log every N steps (default: 10)')
-    
-    # Wandb parameters
-    parser.add_argument('--use_wandb', action='store_true', default=True,
-                        help='Use Weights & Biases for logging')
-    parser.add_argument('--wandb_project', type=str, default='simclr-3d-synapse',
-                        help='Wandb project name')
-    parser.add_argument('--wandb_run_name', type=str, default=None,
-                        help='Wandb run name (default: auto-generated)')
+    parser.add_argument('--run_name', type=str, default=None,
+                        help='Name for this training run (for TensorBoard logging)')
     
     # Distributed training parameters
     parser.add_argument('--world_size', type=int, default=1,
@@ -708,6 +529,9 @@ def main():
                         help='Use distributed training')
     
     args = parser.parse_args()
+    
+    # Process per_cube_norm argument (default True, False if --no_per_cube_norm is specified)
+    args.per_cube_norm = not args.no_per_cube_norm
     
     # Set up distributed training
     if args.distributed:
