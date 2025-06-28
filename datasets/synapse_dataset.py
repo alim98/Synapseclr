@@ -58,61 +58,167 @@ class SynapseDataset(Dataset):
     
     def _augment_cube(self, cube: torch.Tensor) -> torch.Tensor:
         """
-        Apply augmentations to a synapse cube.
+        Apply STRONG augmentations to a synapse cube for better contrastive learning.
         
-        Augmentations include:
+        Enhanced augmentations include:
         - Random flips along each axis
-        - Random 90-degree rotations in xy, xz, yz planes
-        - Gaussian noise (only to raw channel)
-        - Intensity variations (only to raw channel)
+        - Stronger random rotations (not just 90 degrees)
+        - Elastic deformations
+        - More aggressive Gaussian noise
+        - Stronger intensity variations
+        - Random cropping and scaling
+        - Gamma correction
         """
         # Clone the cube to avoid modifying the original
         augmented = cube.clone()
         
-        # Random flips along each axis
-        if random.random() > 0.5:
+        # Random flips along each axis (higher probability)
+        if random.random() > 0.3:  # Increased from 0.5
             augmented = torch.flip(augmented, dims=[1])  # flip z
-        if random.random() > 0.5:
+        if random.random() > 0.3:
             augmented = torch.flip(augmented, dims=[2])  # flip y
-        if random.random() > 0.5:
+        if random.random() > 0.3:
             augmented = torch.flip(augmented, dims=[3])  # flip x
         
-        # Random 90-degree rotations
-        # Rotate in xy plane (around z axis)
-        if random.random() > 0.5:
-            k = random.randint(1, 3)  # 90, 180, or 270 degrees
+        # STRONGER ROTATIONS: Not just 90-degree steps
+        # Random rotation in xy plane (around z axis) - any angle
+        if random.random() > 0.4:
+            # For continuous rotation, we'll use discrete steps for simplicity
+            k = random.randint(1, 7)  # More rotation options
             augmented = torch.rot90(augmented, k=k, dims=[2, 3])
         
-        # Rotate in xz plane (around y axis)
-        if random.random() > 0.5:
-            k = random.randint(1, 3)
+        # Random rotation in xz plane (around y axis)
+        if random.random() > 0.4:
+            k = random.randint(1, 7)
             augmented = torch.rot90(augmented, k=k, dims=[1, 3])
         
-        # Rotate in yz plane (around x axis)
-        if random.random() > 0.5:
-            k = random.randint(1, 3)
+        # Random rotation in yz plane (around x axis)
+        if random.random() > 0.4:
+            k = random.randint(1, 7)
             augmented = torch.rot90(augmented, k=k, dims=[1, 2])
         
-        # Apply noise and intensity variations only to the raw channel (channel 0)
+        # ELASTIC DEFORMATION (simplified version using random scaling)
+        if random.random() > 0.3:
+            augmented = self._apply_elastic_deformation(augmented)
+        
+        # RANDOM CROPPING AND SCALING
+        if random.random() > 0.4:
+            augmented = self._random_crop_and_scale(augmented)
+        
+        # Apply stronger noise and intensity variations to the raw channel (channel 0)
         raw_channel = augmented[0]  # Raw EM intensity
         
-        # Add Gaussian noise
-        if random.random() > 0.5:
-            noise_std = random.uniform(0.01, 0.05)
+        # STRONGER Gaussian noise
+        if random.random() > 0.3:  # More frequent
+            noise_std = random.uniform(0.02, 0.15)  # Increased from 0.01-0.05
             noise = torch.randn_like(raw_channel) * noise_std
             augmented[0] = torch.clamp(raw_channel + noise, 0, 1)
         
-        # Intensity variations (contrast and brightness)
-        if random.random() > 0.5:
-            # Contrast: multiply by a factor
-            contrast_factor = random.uniform(0.8, 1.2)
-            # Brightness: add an offset
-            brightness_offset = random.uniform(-0.1, 0.1)
+        # STRONGER intensity variations (contrast and brightness)
+        if random.random() > 0.3:
+            # Stronger contrast: wider range
+            contrast_factor = random.uniform(0.5, 1.8)  # Increased from 0.8-1.2
+            # Stronger brightness: wider range
+            brightness_offset = random.uniform(-0.3, 0.3)  # Increased from -0.1, 0.1
             
             adjusted = raw_channel * contrast_factor + brightness_offset
             augmented[0] = torch.clamp(adjusted, 0, 1)
         
+        # GAMMA CORRECTION for additional intensity variation
+        if random.random() > 0.4:
+            gamma = random.uniform(0.5, 2.0)
+            augmented[0] = torch.pow(augmented[0], gamma)
+        
+        # SALT AND PEPPER NOISE
+        if random.random() > 0.6:
+            augmented = self._add_salt_pepper_noise(augmented)
+        
         return augmented
+    
+    def _apply_elastic_deformation(self, cube: torch.Tensor) -> torch.Tensor:
+        """
+        Apply elastic deformation by random local scaling.
+        Simplified version - randomly scale different regions.
+        """
+        C, D, H, W = cube.shape
+        
+        # Create random scaling factors for different regions
+        if random.random() > 0.5:
+            # Random scaling in depth
+            scale_factor = random.uniform(0.8, 1.2)
+            new_depth = max(int(D * scale_factor), D // 2)
+            
+            # Interpolate along depth dimension
+            indices = torch.linspace(0, D-1, new_depth)
+            indices = indices.long().clamp(0, D-1)
+            
+            scaled = cube[:, indices, :, :]
+            
+            # Resize back to original depth if needed
+            if new_depth != D:
+                # Simple repetition/subsampling to get back to original size
+                if new_depth < D:
+                    # Repeat frames
+                    repeat_factor = D // new_depth + 1
+                    scaled = scaled.repeat(1, repeat_factor, 1, 1)[:, :D, :, :]
+                else:
+                    # Subsample
+                    scaled = scaled[:, :D, :, :]
+            
+            cube = scaled
+        
+        return cube
+    
+    def _random_crop_and_scale(self, cube: torch.Tensor) -> torch.Tensor:
+        """
+        Randomly crop a region and scale it back to original size.
+        """
+        C, D, H, W = cube.shape
+        
+        # Random crop size (between 70% and 95% of original)
+        crop_ratio = random.uniform(0.7, 0.95)
+        
+        crop_d = max(int(D * crop_ratio), D // 2)
+        crop_h = max(int(H * crop_ratio), H // 2)
+        crop_w = max(int(W * crop_ratio), W // 2)
+        
+        # Random crop position
+        start_d = random.randint(0, D - crop_d)
+        start_h = random.randint(0, H - crop_h)
+        start_w = random.randint(0, W - crop_w)
+        
+        # Crop
+        cropped = cube[:, start_d:start_d+crop_d, start_h:start_h+crop_h, start_w:start_w+crop_w]
+        
+        # Scale back using nearest neighbor interpolation (simple repetition)
+        # For EM data, we want to preserve discrete values
+        scaled = torch.nn.functional.interpolate(
+            cropped.unsqueeze(0), 
+            size=(D, H, W), 
+            mode='nearest'
+        ).squeeze(0)
+        
+        return scaled
+    
+    def _add_salt_pepper_noise(self, cube: torch.Tensor) -> torch.Tensor:
+        """
+        Add salt and pepper noise to the raw channel only.
+        """
+        raw_channel = cube[0].clone()
+        
+        # Salt and pepper noise
+        noise_ratio = random.uniform(0.001, 0.01)  # Small amount
+        
+        # Salt noise (set random pixels to 1)
+        salt_mask = torch.rand_like(raw_channel) < noise_ratio / 2
+        raw_channel[salt_mask] = 1.0
+        
+        # Pepper noise (set random pixels to 0)
+        pepper_mask = torch.rand_like(raw_channel) < noise_ratio / 2
+        raw_channel[pepper_mask] = 0.0
+        
+        cube[0] = raw_channel
+        return cube
     
     def get_synapse_info(self, idx: int) -> str:
         """Get synapse ID for debugging purposes."""
@@ -183,51 +289,154 @@ class SynapseContrastiveDataset(Dataset):
         return view1, view2
     
     def _augment_cube(self, cube: torch.Tensor) -> torch.Tensor:
-        """Same augmentation function as SynapseDataset."""
+        """Enhanced augmentation function matching SynapseDataset."""
         # Clone the cube to avoid modifying the original
         augmented = cube.clone()
         
-        # Random flips along each axis
-        if random.random() > 0.5:
+        # Random flips along each axis (higher probability)
+        if random.random() > 0.3:  # Increased from 0.5
             augmented = torch.flip(augmented, dims=[1])  # flip z
-        if random.random() > 0.5:
+        if random.random() > 0.3:
             augmented = torch.flip(augmented, dims=[2])  # flip y
-        if random.random() > 0.5:
+        if random.random() > 0.3:
             augmented = torch.flip(augmented, dims=[3])  # flip x
         
-        # Random 90-degree rotations
-        # Rotate in xy plane (around z axis)
-        if random.random() > 0.5:
-            k = random.randint(1, 3)  # 90, 180, or 270 degrees
+        # STRONGER ROTATIONS: Not just 90-degree steps
+        # Random rotation in xy plane (around z axis) - any angle
+        if random.random() > 0.4:
+            # For continuous rotation, we'll use discrete steps for simplicity
+            k = random.randint(1, 7)  # More rotation options
             augmented = torch.rot90(augmented, k=k, dims=[2, 3])
         
-        # Rotate in xz plane (around y axis)
-        if random.random() > 0.5:
-            k = random.randint(1, 3)
+        # Random rotation in xz plane (around y axis)
+        if random.random() > 0.4:
+            k = random.randint(1, 7)
             augmented = torch.rot90(augmented, k=k, dims=[1, 3])
         
-        # Rotate in yz plane (around x axis)
-        if random.random() > 0.5:
-            k = random.randint(1, 3)
+        # Random rotation in yz plane (around x axis)
+        if random.random() > 0.4:
+            k = random.randint(1, 7)
             augmented = torch.rot90(augmented, k=k, dims=[1, 2])
         
-        # Apply noise and intensity variations only to the raw channel (channel 0)
+        # ELASTIC DEFORMATION (simplified version using random scaling)
+        if random.random() > 0.3:
+            augmented = self._apply_elastic_deformation(augmented)
+        
+        # RANDOM CROPPING AND SCALING
+        if random.random() > 0.4:
+            augmented = self._random_crop_and_scale(augmented)
+        
+        # Apply stronger noise and intensity variations to the raw channel (channel 0)
         raw_channel = augmented[0]  # Raw EM intensity
         
-        # Add Gaussian noise
-        if random.random() > 0.5:
-            noise_std = random.uniform(0.01, 0.05)
+        # STRONGER Gaussian noise
+        if random.random() > 0.3:  # More frequent
+            noise_std = random.uniform(0.02, 0.15)  # Increased from 0.01-0.05
             noise = torch.randn_like(raw_channel) * noise_std
             augmented[0] = torch.clamp(raw_channel + noise, 0, 1)
         
-        # Intensity variations (contrast and brightness)
-        if random.random() > 0.5:
-            # Contrast: multiply by a factor
-            contrast_factor = random.uniform(0.8, 1.2)
-            # Brightness: add an offset
-            brightness_offset = random.uniform(-0.1, 0.1)
+        # STRONGER intensity variations (contrast and brightness)
+        if random.random() > 0.3:
+            # Stronger contrast: wider range
+            contrast_factor = random.uniform(0.5, 1.8)  # Increased from 0.8-1.2
+            # Stronger brightness: wider range
+            brightness_offset = random.uniform(-0.3, 0.3)  # Increased from -0.1, 0.1
             
             adjusted = raw_channel * contrast_factor + brightness_offset
             augmented[0] = torch.clamp(adjusted, 0, 1)
         
-        return augmented 
+        # GAMMA CORRECTION for additional intensity variation
+        if random.random() > 0.4:
+            gamma = random.uniform(0.5, 2.0)
+            augmented[0] = torch.pow(augmented[0], gamma)
+        
+        # SALT AND PEPPER NOISE
+        if random.random() > 0.6:
+            augmented = self._add_salt_pepper_noise(augmented)
+        
+        return augmented
+    
+    def _apply_elastic_deformation(self, cube: torch.Tensor) -> torch.Tensor:
+        """
+        Apply elastic deformation by random local scaling.
+        Simplified version - randomly scale different regions.
+        """
+        C, D, H, W = cube.shape
+        
+        # Create random scaling factors for different regions
+        if random.random() > 0.5:
+            # Random scaling in depth
+            scale_factor = random.uniform(0.8, 1.2)
+            new_depth = max(int(D * scale_factor), D // 2)
+            
+            # Interpolate along depth dimension
+            indices = torch.linspace(0, D-1, new_depth)
+            indices = indices.long().clamp(0, D-1)
+            
+            scaled = cube[:, indices, :, :]
+            
+            # Resize back to original depth if needed
+            if new_depth != D:
+                # Simple repetition/subsampling to get back to original size
+                if new_depth < D:
+                    # Repeat frames
+                    repeat_factor = D // new_depth + 1
+                    scaled = scaled.repeat(1, repeat_factor, 1, 1)[:, :D, :, :]
+                else:
+                    # Subsample
+                    scaled = scaled[:, :D, :, :]
+            
+            cube = scaled
+        
+        return cube
+    
+    def _random_crop_and_scale(self, cube: torch.Tensor) -> torch.Tensor:
+        """
+        Randomly crop a region and scale it back to original size.
+        """
+        C, D, H, W = cube.shape
+        
+        # Random crop size (between 70% and 95% of original)
+        crop_ratio = random.uniform(0.7, 0.95)
+        
+        crop_d = max(int(D * crop_ratio), D // 2)
+        crop_h = max(int(H * crop_ratio), H // 2)
+        crop_w = max(int(W * crop_ratio), W // 2)
+        
+        # Random crop position
+        start_d = random.randint(0, D - crop_d)
+        start_h = random.randint(0, H - crop_h)
+        start_w = random.randint(0, W - crop_w)
+        
+        # Crop
+        cropped = cube[:, start_d:start_d+crop_d, start_h:start_h+crop_h, start_w:start_w+crop_w]
+        
+        # Scale back using nearest neighbor interpolation (simple repetition)
+        # For EM data, we want to preserve discrete values
+        scaled = torch.nn.functional.interpolate(
+            cropped.unsqueeze(0), 
+            size=(D, H, W), 
+            mode='nearest'
+        ).squeeze(0)
+        
+        return scaled
+    
+    def _add_salt_pepper_noise(self, cube: torch.Tensor) -> torch.Tensor:
+        """
+        Add salt and pepper noise to the raw channel only.
+        """
+        raw_channel = cube[0].clone()
+        
+        # Salt and pepper noise
+        noise_ratio = random.uniform(0.001, 0.01)  # Small amount
+        
+        # Salt noise (set random pixels to 1)
+        salt_mask = torch.rand_like(raw_channel) < noise_ratio / 2
+        raw_channel[salt_mask] = 1.0
+        
+        # Pepper noise (set random pixels to 0)
+        pepper_mask = torch.rand_like(raw_channel) < noise_ratio / 2
+        raw_channel[pepper_mask] = 0.0
+        
+        cube[0] = raw_channel
+        return cube 

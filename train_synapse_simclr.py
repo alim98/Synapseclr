@@ -244,8 +244,8 @@ def main_worker(gpu, args):
     if args.distributed:
         effective_batch *= args.world_size
     
-    # Adjust learning rate based on batch size
-    lr = args.base_lr * (effective_batch / 256)
+    # Use base learning rate directly without scaling
+    lr = args.base_lr
     
     if rank == 0:
         print(f"Using learning rate: {lr}")
@@ -277,34 +277,60 @@ def main_worker(gpu, args):
         gradient_accumulation_steps=args.gradient_accumulation_steps
     )
     
-    # Resume from checkpoint
+    # Resume from checkpoint - automatically find latest if not specified
     start_epoch = 0
     global_step = 0
     best_loss = float('inf')
     
+    # Auto-detect latest checkpoint if no resume path specified
+    if not args.resume and not args.no_auto_resume:
+        latest_checkpoint = os.path.join(args.checkpoint_dir, 'checkpoint_latest.pt')
+        if os.path.exists(latest_checkpoint):
+            args.resume = latest_checkpoint
+            if rank == 0:
+                print(f"Auto-detected latest checkpoint: {args.resume}")
+    
     if args.resume and os.path.exists(args.resume):
         if rank == 0:
             print(f"Resuming from checkpoint: {args.resume}")
-        checkpoint = torch.load(args.resume, map_location=device)
-        
-        if isinstance(model, DDP):
-            model.module.load_state_dict(checkpoint['model_state_dict'])
-        else:
-            model.load_state_dict(checkpoint['model_state_dict'])
+        try:
+            checkpoint = torch.load(args.resume, map_location=device)
             
-        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-        
-        if checkpoint['scheduler_state_dict']:
-            scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+            if isinstance(model, DDP):
+                model.module.load_state_dict(checkpoint['model_state_dict'])
+            else:
+                model.load_state_dict(checkpoint['model_state_dict'])
+                
+            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
             
-        if checkpoint['scaler_state_dict'] and args.mixed_precision:
-            scaler.load_state_dict(checkpoint['scaler_state_dict'])
+            if 'scheduler_state_dict' in checkpoint and checkpoint['scheduler_state_dict']:
+                scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+                
+            if 'scaler_state_dict' in checkpoint and checkpoint['scaler_state_dict'] and args.mixed_precision:
+                scaler.load_state_dict(checkpoint['scaler_state_dict'])
+                
+            start_epoch = checkpoint['epoch'] + 1
+            global_step = checkpoint['global_step']
             
-        start_epoch = checkpoint['epoch'] + 1
-        global_step = checkpoint['global_step']
-        
-        if 'avg_loss' in checkpoint:
-            best_loss = checkpoint['avg_loss']
+            if 'avg_loss' in checkpoint:
+                best_loss = checkpoint['avg_loss']
+                
+            if rank == 0:
+                print(f"Successfully resumed from epoch {start_epoch-1}, loss: {best_loss:.5f}")
+                
+        except Exception as e:
+            if rank == 0:
+                print(f"Failed to load checkpoint {args.resume}: {e}")
+                print("Starting training from scratch...")
+            start_epoch = 0
+            global_step = 0
+            best_loss = float('inf')
+    else:
+        if rank == 0:
+            if args.resume:
+                print(f"Checkpoint {args.resume} not found, starting from scratch...")
+            else:
+                print("No existing checkpoint found, starting training from scratch...")
     
     # Training loop
     if rank == 0:
@@ -382,7 +408,7 @@ def main():
                         help='Number of training epochs')
     parser.add_argument('--batch_size', type=int, default=32,
                         help='Batch size per GPU')
-    parser.add_argument('--base_lr', type=float, default=0.0003,
+    parser.add_argument('--base_lr', type=float, default=0.001,
                         help='Base learning rate')
     parser.add_argument('--weight_decay', type=float, default=1e-4,
                         help='Weight decay')
@@ -419,7 +445,9 @@ def main():
     parser.add_argument('--run_name', type=str, default=None,
                         help='Name for this training run')
     parser.add_argument('--resume', type=str, default=None,
-                        help='Path to checkpoint to resume from')
+                        help='Path to checkpoint to resume from (auto-detects latest if not specified)')
+    parser.add_argument('--no_auto_resume', action='store_true',
+                        help='Disable automatic resuming from latest checkpoint')
     
     # Distributed training
     parser.add_argument('--distributed', action='store_true',

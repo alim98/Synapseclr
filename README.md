@@ -1,5 +1,5 @@
 # SimCLR for Synaptic EM Data
-
+⚡ main ~ python train_synapse_simclr.py --data_dir datareal --epochs 10 --batch_size 8 --cube_size 80 --run_name my_experimentssss
 This project implements SimCLR self-supervised learning for 3D electron microscopy (EM) data of synapses, following the approach described in [Chen et al., 2020](https://arxiv.org/abs/2002.05709) with adaptations for 3D volumetric data.
 
 ## Project Overview
@@ -212,3 +212,82 @@ After 150-200 epochs of training:
 
 - Chen, T., Kornblith, S., Norouzi, M., & Hinton, G. (2020). A Simple Framework for Contrastive Learning of Visual Representations. ICML 2020.
 - Lu, Y., Koohababni, N.A., et al. (2022). Self-supervised learning with masked image modeling for instance segmentation and classification in electron microscopy. Nature Machine Intelligence.
+
+## Visualizing Preprocessed Samples
+
+Before training, it's recommended to visualize some preprocessed samples to sanity check your data pipeline:
+
+```bash
+# Visualize 5 samples with augmentations
+python visualize_samples.py \
+    --data_root /path/to/your/data \
+    --excel_file /path/to/synapse_annotations.xlsx \
+    --num_samples 5 \
+    --show_augmentations \
+    --save_dir ./visualizations \
+    --bbox_size 64
+```
+
+This will:
+- Load synapse cubes using your current preprocessing pipeline
+- Display all three channels (raw EM, vesicles, segmentation) 
+- Show middle slices in XY, XZ, and YZ planes
+- Compare original vs augmented views if `--show_augmentations` is used
+- Print detailed statistics about each sample
+- Save visualization plots to the specified directory
+
+**Tip**: Check that the vesicle and segmentation channels have reasonable non-zero content and that the augmentations look sensible before starting training.
+
+## Training
+
+Basic training command:
+```bash
+python train_synapse_simclr.py \
+    --data_root /path/to/your/data \
+    --excel_file /path/to/synapse_annotations.xlsx \
+    --batch_size 32 \
+    --epochs 200 \
+    --learning_rate 1e-3 \
+    --temperature 0.1 \
+    --bbox_size 64 \
+    --run_name my_experiment
+```
+
+## Key Parameters
+
+- `--data_root`: Root directory containing bbox folders
+- `--excel_file`: Path to Excel file with synapse annotations
+- `--bbox_size`: Size of extracted synapse cubes (default: 64)
+- `--batch_size`: Training batch size (default: 32)
+- `--temperature`: Temperature parameter for contrastive loss (default: 0.1)
+- `--memory_efficient`: Use memory-efficient loading for large datasets
+- `--run_name`: Custom name for this training run (for TensorBoard logs)
+
+## Monitoring Training
+
+View training progress with TensorBoard:
+```bash
+tensorboard --logdir tensorboard_logs
+```
+
+Training logs are saved with timestamps to separate different runs:
+- `checkpoints/tensorboard_logs/{run_name}_{timestamp}/`
+
+## Model Architecture
+
+- **Backbone**: 3D ResNet-18/34/50 (configurable)
+- **Input**: 3-channel 3D cubes (raw EM + vesicles + segmentation)  
+- **Projection head**: 2-layer MLP with ReLU
+- **Output**: 128-dimensional embeddings
+
+## Augmentations
+
+The following augmentations are applied during training:
+- Random flips along all axes
+- Random 90-degree rotations in XY, XZ, YZ planes
+- Gaussian noise (raw channel only)
+- Contrast/brightness variations (raw channel only)
+
+## License
+
+[Add your license here]
