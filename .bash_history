@@ -7,3 +7,6 @@
 . "/system/environment/.cursor-server/cli/servers/Stable-5b19bac7a947f54e4caa3eb7e4c5fbf832389850/server/out/vs/workbench/contrib/terminal/common/scripts/shellIntegration-bash.sh"
 . "/system/environment/.cursor-server/cli/servers/Stable-5b19bac7a947f54e4caa3eb7e4c5fbf832389850/server/out/vs/workbench/contrib/terminal/common/scripts/shellIntegration-bash.sh"
 . "/system/environment/.cursor-server/cli/servers/Stable-5b19bac7a947f54e4caa3eb7e4c5fbf832389850/server/out/vs/workbench/contrib/terminal/common/scripts/shellIntegration-bash.sh"
+. "/system/environment/.cursor-server/cli/servers/Stable-5b19bac7a947f54e4caa3eb7e4c5fbf832389850/server/out/vs/workbench/contrib/terminal/common/scripts/shellIntegration-bash.sh"
+. "/system/environment/.cursor-server/cli/servers/Stable-5b19bac7a947f54e4caa3eb7e4c5fbf832389850/server/out/vs/workbench/contrib/terminal/common/scripts/shellIntegration-bash.sh"
+. "/system/environment/.cursor-server/cli/servers/Stable-5b19bac7a947f54e4caa3eb7e4c5fbf832389850/server/out/vs/workbench/contrib/terminal/common/scripts/shellIntegration-bash.sh"

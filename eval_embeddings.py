@@ -16,8 +16,8 @@ from tqdm import tqdm
 
 # Local imports
 from models.simclr3d import SimCLR
-from datasets.bbox_loader import BBoxLoader
-from datasets.random_cube import RandomCubeDataset
+from datasets.synapse_loader import SynapseLoader
+from datasets.synapse_dataset import SynapseDataset
 
 
 def hopkins_statistic(X: np.ndarray, m: int = None) -> float:
@@ -79,19 +79,18 @@ def hopkins_statistic(X: np.ndarray, m: int = None) -> float:
     return h
 
 
-def extract_embeddings(model: torch.nn.Module, dataset: RandomCubeDataset, 
+def extract_embeddings(model: torch.nn.Module, dataset: SynapseDataset, 
                        device: torch.device, max_samples: int = 100000,
-                       batch_size: int = 32, mask_overlap_threshold: float = 0.4) -> np.ndarray:
+                       batch_size: int = 32) -> np.ndarray:
     """
     Extract embeddings from the model for a subset of dataset samples.
     
     Args:
         model: SimCLR model (only backbone will be used)
-        dataset: RandomCubeDataset for sampling cubes
+        dataset: SynapseDataset for synapse cubes
         device: Device to run the model on
         max_samples: Maximum number of samples to extract embeddings for
         batch_size: Batch size for inference
-        mask_overlap_threshold: Minimum vesicle mask overlap required
         
     Returns:
         Numpy array of embeddings with shape (n_samples, embedding_dim)
@@ -99,55 +98,47 @@ def extract_embeddings(model: torch.nn.Module, dataset: RandomCubeDataset,
     model.eval()
     embeddings = []
     
-    # Determine how many samples per bbox
-    num_bboxes = len(dataset.bbox_names)
-    samples_per_bbox = max(1, max_samples // num_bboxes)
+    # Limit number of samples if dataset is larger than max_samples
+    num_samples = min(len(dataset), max_samples)
+    print(f"Extracting embeddings from {num_samples} synapse samples...")
     
-    print(f"Extracting embeddings from {num_bboxes} bboxes, "
-          f"{samples_per_bbox} samples per bbox...")
+    # Create dataloader for efficient batch processing
+    from torch.utils.data import DataLoader, Subset
+    import random
     
-    # Process each bbox to balance the dataset
+    # Randomly sample indices if we need fewer samples
+    if len(dataset) > max_samples:
+        indices = random.sample(range(len(dataset)), max_samples)
+        subset_dataset = Subset(dataset, indices)
+    else:
+        subset_dataset = dataset
+    
+    dataloader = DataLoader(
+        subset_dataset, 
+        batch_size=batch_size, 
+        shuffle=False, 
+        num_workers=0,  # Single-threaded for simplicity
+        pin_memory=True
+    )
+    
     with torch.no_grad():
-        for bbox_name in tqdm(dataset.bbox_names):
-            # Count samples for this bbox
-            bbox_samples = 0
+        for batch_data in tqdm(dataloader, desc="Extracting embeddings"):
+            # Handle both single cube and augmented pairs
+            if isinstance(batch_data, (list, tuple)) and len(batch_data) == 2:
+                # If we get augmented pairs, just use the first view
+                cubes = batch_data[0]
+            else:
+                cubes = batch_data
             
-            # Create a batch
-            batch = []
+            # Move to device
+            cubes = cubes.to(device, non_blocking=True)
             
-            # Sample cubes from this bbox
-            while bbox_samples < samples_per_bbox:
-                # Sample from this specific bbox
-                try:
-                    cube, _ = dataset._sample_valid_cube(bbox_name)
-                    
-                    # Check if the cube has significant vesicle content
-                    if hasattr(dataset, 'vesicle_channel'):
-                        vesicle_mask = cube[dataset.vesicle_channel]
-                        if torch.sum(vesicle_mask) / torch.numel(vesicle_mask) < mask_overlap_threshold / 10:
-                            continue  # Skip cubes with minimal vesicle content
-                    
-                    # Add to batch
-                    batch.append(cube)
-                    bbox_samples += 1
-                    
-                    # Process batch if full
-                    if len(batch) == batch_size or bbox_samples == samples_per_bbox:
-                        # Stack and move to device
-                        batch_tensor = torch.stack(batch).to(device)
-                        
-                        # Extract features
-                        features = model.get_features(batch_tensor)
-                        
-                        # Move to CPU and convert to numpy
-                        features = features.cpu().numpy()
-                        embeddings.append(features)
-                        
-                        # Reset batch
-                        batch = []
-                except Exception as e:
-                    print(f"Error sampling from {bbox_name}: {e}")
-                    break
+            # Extract features using the backbone
+            features = model.get_features(cubes)
+            
+            # Move to CPU and convert to numpy
+            features = features.cpu().numpy()
+            embeddings.append(features)
     
     # Concatenate all embeddings
     all_embeddings = np.vstack(embeddings) if embeddings else np.array([])
@@ -282,6 +273,10 @@ def main():
                         help='Path to model checkpoint')
     parser.add_argument('--backbone', type=str, default='resnet3d',
                         help='Backbone model (only resnet3d supported)')
+    parser.add_argument('--hidden_dim', type=int, default=512,
+                        help='Hidden dimension used in the training projector (default: 512)')
+    parser.add_argument('--output_dim', type=int, default=128,
+                        help='Output projection dimension (default: 128)')
     parser.add_argument('--cube_size', type=int, default=80,
                         help='Size of cube to sample (default: 80)')
     
@@ -308,36 +303,111 @@ def main():
     
     # Load model
     print(f"Loading model from {args.checkpoint}...")
-    model = SimCLR(in_channels=3)
+    # Instantiate with user-specified projector dims so it matches training
+    model = SimCLR(in_channels=3, hidden_dim=args.hidden_dim, out_dim=args.output_dim)
     
-    checkpoint = torch.load(args.checkpoint, map_location=device)
+    # ------------------------------------------------------------------
+    # PyTorch >=2.6 changed the default of `weights_only` to True which can
+    # break loading checkpoints that contain pickled Python objects such as
+    # `argparse.Namespace`.  We first attempt the safe default (weights_only
+    # = True) and transparently fall back to the old behaviour if that fails.
+    # ------------------------------------------------------------------
+    try:
+        checkpoint = torch.load(args.checkpoint, map_location=device)
+    except Exception as e:
+        # Typical message: "Weights only load failed"  – retry with
+        # weights_only=False **only if you trust the checkpoint's source**.
+        print(f"Warning: safe checkpoint load failed ({e}). Retrying with weights_only=False...")
+        checkpoint = torch.load(args.checkpoint, map_location=device, weights_only=False)
     
-    # Handle both full model and backbone-only checkpoints
-    if 'model_state_dict' in checkpoint:
-        model.load_state_dict(checkpoint['model_state_dict'])
+    # Robust checkpoint loading
+    # ------------------------------------------------------------------
+    def _load_backbone_from(state_dict: dict):
+        backbone_state = {k.replace('backbone.', ''): v for k, v in state_dict.items() if k.startswith('backbone.')}
+        missing = model.backbone.load_state_dict(backbone_state, strict=False)
+        if missing.missing_keys:
+            print(f"Warning: Missing backbone keys when loading checkpoint: {missing.missing_keys}")
+
+    if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
+        try:
+            model.load_state_dict(checkpoint['model_state_dict'])
+        except RuntimeError as e:
+            print(f"Full model load failed due to size mismatch ({e}). Loading backbone only...")
+            _load_backbone_from(checkpoint['model_state_dict'])
     elif isinstance(checkpoint, dict) and not 'epoch' in checkpoint:
-        model.load_state_dict(checkpoint)
+        # Might be full or backbone-only state_dict
+        try:
+            model.load_state_dict(checkpoint)
+        except RuntimeError as e:
+            print(f"State-dict load failed ({e}). Attempting backbone-only load...")
+            _load_backbone_from(checkpoint)
     else:
-        # Assume it's just the backbone
-        model.backbone.load_state_dict(checkpoint)
+        # Assume it's just the backbone weights as raw state_dict
+        try:
+            model.backbone.load_state_dict(checkpoint)
+        except RuntimeError as e:
+            print(f"Backbone load still failed ({e}). Please check the checkpoint file.")
     
     model = model.to(device)
     
-    # Load data
-    print("Loading bbox data...")
-    loader = BBoxLoader(
+    # Load synapse data (same as training)
+    print("Loading synapse data...")
+    loader = SynapseLoader(
         data_dir=args.data_dir,
         preproc_dir=args.preproc_dir,
-        create_h5=True
+        cube_size=args.cube_size
     )
-    volumes = loader.process_all_bboxes()
     
-    # Create dataset for sampling random cubes
-    dataset = RandomCubeDataset(
-        bbox_volumes=volumes,
-        cubes_per_bbox=args.max_samples // len(volumes) + 1,
-        cube_size=args.cube_size,
-        mask_aware=False  # Don't need mask-aware for evaluation
+    # Process all synapses (use memory efficient loading if available)
+    try:
+        synapses = loader.process_all_synapses(memory_efficient=True)
+    except Exception as e:
+        print(f"Failed to load synapses from Excel files: {e}")
+        print("Falling back to loading directly from H5 files...")
+        synapses = {}
+    
+    # If memory_efficient was used, load from paths
+    if synapses and isinstance(next(iter(synapses.values())), str):
+        print("Loading synapses from H5 files...")
+        synapses = loader.load_from_paths(synapses)
+        
+        # Verify all synapses loaded successfully
+        failed_loads = [name for name, syn in synapses.items() if syn is None]
+        if failed_loads:
+            print(f"Warning: Failed to load some synapses: {failed_loads}")
+            # Remove failed loads
+            synapses = {name: syn for name, syn in synapses.items() if syn is not None}
+    
+    # Fallback: Load directly from H5 files if no synapses found
+    if len(synapses) == 0:
+        print("No synapses loaded from Excel approach. Loading directly from H5 files...")
+        import h5py
+        for i in range(1, 8):
+            h5_file = os.path.join(args.preproc_dir, f"bbox{i}_synapses.h5")
+            if os.path.exists(h5_file):
+                try:
+                    with h5py.File(h5_file, 'r') as f:
+                        for key in f.keys():
+                            # Read the synapse cube
+                            cube_data = f[key][:]
+                            cube_tensor = torch.from_numpy(cube_data).float()
+                            # Use bbox prefix for consistency with training
+                            synapse_id = f"bbox{i}_{key}"
+                            synapses[synapse_id] = cube_tensor
+                    print(f"Loaded {len(list(h5py.File(h5_file, 'r').keys()))} synapses from bbox{i}")
+                except Exception as e:
+                    print(f"Error loading H5 file {h5_file}: {e}")
+    
+    print(f"Loaded {len(synapses)} synapse cubes")
+    
+    if len(synapses) == 0:
+        print("ERROR: No synapses found! Cannot proceed with evaluation.")
+        return
+    
+    # Create dataset (no augmentation for evaluation)
+    dataset = SynapseDataset(
+        synapse_cubes=synapses,
+        augment=False  # No augmentation for evaluation
     )
     
     # Extract embeddings
@@ -348,6 +418,11 @@ def main():
         max_samples=args.max_samples,
         batch_size=args.batch_size
     )
+    
+    # Check if we got any embeddings
+    if embeddings.size == 0:
+        print("ERROR: No embeddings extracted! Cannot proceed with analysis.")
+        return
     
     # Save embeddings
     np.save(os.path.join(args.output_dir, 'embeddings.npy'), embeddings)

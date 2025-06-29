@@ -75,7 +75,10 @@ def train_epoch(model, train_loader, optimizer, scheduler, scaler, device,
             else:
                 optimizer.step()
             
-            scheduler.step()
+            # Only step scheduler if it's not ReduceLROnPlateau (which needs epoch-level stepping)
+            if not isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
+                scheduler.step()
+            
             optimizer.zero_grad()
             global_step += 1
         
@@ -268,13 +271,21 @@ def main_worker(gpu, args):
     
     # Setup optimizer, scheduler, and scaler
     steps_per_epoch = len(train_loader)
+    
+    # Handle backward compatibility for use_warm_restarts
+    scheduler_type = args.scheduler_type
+    if args.use_warm_restarts and scheduler_type == 'constant':
+        scheduler_type = 'warm_restarts'
+        print("Warning: --use_warm_restarts is deprecated, use --scheduler_type warm_restarts")
+    
     optimizer, scheduler, scaler = get_optimizer_and_scheduler(
         model,
         lr=lr,
         weight_decay=args.weight_decay,
         epochs=args.epochs,
         steps_per_epoch=steps_per_epoch,
-        gradient_accumulation_steps=args.gradient_accumulation_steps
+        gradient_accumulation_steps=args.gradient_accumulation_steps,
+        scheduler_type=scheduler_type
     )
     
     # Resume from checkpoint - automatically find latest if not specified
@@ -309,7 +320,13 @@ def main_worker(gpu, args):
             optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
             
             if 'scheduler_state_dict' in checkpoint and checkpoint['scheduler_state_dict']:
-                scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+                # Reset scheduler instead of loading state - gives fresh learning rate
+                # This prevents the learning rate from staying near zero when resuming
+                print(f"Resetting scheduler to give fresh learning rate (was at step {scheduler.last_epoch})")
+                # Don't load the scheduler state, let it start fresh
+                pass
+            else:
+                print("No scheduler state found in checkpoint, using fresh scheduler")
                 
             if 'scaler_state_dict' in checkpoint and checkpoint['scaler_state_dict'] and args.mixed_precision:
                 scaler.load_state_dict(checkpoint['scaler_state_dict'])
@@ -371,6 +388,10 @@ def main_worker(gpu, args):
                 model, optimizer, scheduler, scaler,
                 epoch, global_step, avg_loss, args, is_best
             )
+        
+        # Step ReduceLROnPlateau scheduler at epoch level
+        if isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
+            scheduler.step(avg_loss)
     
     # Save final model
     if rank == 0:
@@ -431,6 +452,11 @@ def main():
                         help='Number of gradient accumulation steps')
     parser.add_argument('--mixed_precision', action='store_true',
                         help='Use mixed precision training')
+    parser.add_argument('--scheduler_type', type=str, default='constant',
+                        choices=['constant', 'step', 'plateau', 'cosine', 'warm_restarts'],
+                        help='Type of learning rate scheduler')
+    parser.add_argument('--use_warm_restarts', action='store_true',
+                        help='Use cosine warm restarts for learning rate schedule (deprecated - use --scheduler_type warm_restarts)')
     
     # System parameters
     parser.add_argument('--num_workers', type=int, default=4,

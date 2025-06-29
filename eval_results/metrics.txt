@@ -1,0 +1,5 @@
+silhouette_score: 0.05406896770000458
+hopkins_statistic: 0.7454793216892929
+n_samples: 100
+embedding_dim: 512
+checkpoint: checkpoints/checkpoint_best.pt

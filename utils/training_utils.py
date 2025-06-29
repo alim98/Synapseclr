@@ -128,9 +128,9 @@ def filter_bias_and_bn(model):
     ]
 
 
-def get_optimizer_and_scheduler(model, lr, weight_decay, epochs, steps_per_epoch, gradient_accumulation_steps=1):
+def get_optimizer_and_scheduler(model, lr, weight_decay, epochs, steps_per_epoch, gradient_accumulation_steps=1, scheduler_type='constant'):
     """
-    Create LARS optimizer and cosine learning rate scheduler.
+    Create LARS optimizer and learning rate scheduler.
     
     Args:
         model: SimCLR model
@@ -139,6 +139,7 @@ def get_optimizer_and_scheduler(model, lr, weight_decay, epochs, steps_per_epoch
         epochs: Total number of epochs
         steps_per_epoch: Steps per epoch
         gradient_accumulation_steps: Number of steps to accumulate gradients
+        scheduler_type: Type of scheduler ('constant', 'step', 'plateau', 'cosine', 'warm_restarts')
         
     Returns:
         Optimizer, scheduler, and gradient scaler
@@ -157,16 +158,49 @@ def get_optimizer_and_scheduler(model, lr, weight_decay, epochs, steps_per_epoch
         eta=0.001
     )
     
-    # Create cosine scheduler
-    # Adjust steps_per_epoch to account for gradient accumulation
-    effective_steps_per_epoch = steps_per_epoch // gradient_accumulation_steps
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer,
-        T_max=epochs * effective_steps_per_epoch,
-    )
+    # Create scheduler based on type
+    if scheduler_type == 'constant':
+        # No learning rate decay - keeps LR constant
+        scheduler = torch.optim.lr_scheduler.LambdaLR(
+            optimizer,
+            lr_lambda=lambda step: 1.0  # Always return 1.0 to keep LR constant
+        )
+    elif scheduler_type == 'step':
+        # Step decay - reduce LR by factor every N epochs (not time-based)
+        scheduler = torch.optim.lr_scheduler.StepLR(
+            optimizer,
+            step_size=50,  # Reduce every 50 epochs
+            gamma=0.5      # Multiply by 0.5
+        )
+    elif scheduler_type == 'plateau':
+        # Reduce LR when loss plateaus (adaptive, not time-based)
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer,
+            mode='min',
+            factor=0.5,
+            patience=10,   # Wait 10 epochs without improvement
+            verbose=True
+        )
+    elif scheduler_type == 'cosine':
+        # Original cosine annealing (epoch-based)
+        effective_steps_per_epoch = steps_per_epoch // gradient_accumulation_steps
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer,
+            T_max=epochs * effective_steps_per_epoch,
+        )
+    elif scheduler_type == 'warm_restarts':
+        # Cosine with warm restarts (epoch-based)
+        effective_steps_per_epoch = steps_per_epoch // gradient_accumulation_steps
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
+            optimizer,
+            T_0=50 * effective_steps_per_epoch,  # Restart every 50 epochs
+            T_mult=1,  # Keep the same restart period
+            eta_min=lr * 0.01  # Minimum learning rate (1% of base)
+        )
+    else:
+        raise ValueError(f"Unknown scheduler type: {scheduler_type}")
     
     # Create gradient scaler for mixed precision training
-    # Use the standard GradScaler (works across PyTorch versions)
     scaler = GradScaler()
     
     return optimizer, scheduler, scaler 
