@@ -922,37 +922,34 @@ def create_animated_gif_visualization(features_df, gif_paths, output_dir, dim_re
     # Save the HTML file
     html_path = output_dir / f"animated_gifs_{dim_reduction}_visualization.html"
     try:
-        # Add debug statements to narrow down the error
-        print("Types of data:")
-        print("- originalPositions type:", type(originalPositions))
-        print("- frames_content type:", type(frames_content))
-        print("- frames_content length:", len(frames_content))
-        print("- First item in samples_with_gifs:", samples_with_gifs[0] if samples_with_gifs else "No samples")
+        # # Add debug statements to narrow down the error
+        # print("Types of data:")
+        # print("- originalPositions type:", type(originalPositions))
+        # print("- frames_content type:", type(frames_content))
+        # print("- frames_content length:", len(frames_content))
+        # print("- First item in samples_with_gifs:", samples_with_gifs[0] if samples_with_gifs else "No samples")
         
-        # Check if the points_content and gifs_content are empty 
-        if not points_content.strip():
-            print("WARNING: points_content is empty! No background points will be shown.")
+        # # Check if the points_content and gifs_content are empty 
+        # if not points_content.strip():
+        #     print("WARNING: points_content is empty! No background points will be shown.")
         
-        if not gifs_content.strip():
-            print("WARNING: gifs_content is empty! No GIFs will be shown.")
+        # if not gifs_content.strip():
+        #     print("WARNING: gifs_content is empty! No GIFs will be shown.")
             
         # Write the HTML file
         with open(html_path, 'w', encoding='utf-8') as f:
             f.write(html_content)
         
-        print(f"Created animated GIF visualization with embedded data: {html_path}")
+        # print(f"Created animated GIF visualization with embedded data: {html_path}")
         
         # Print a sample of the HTML content to verify it has data
         html_sample = html_content[0:1000]  # Get first 1000 chars
-        print(f"Sample of HTML content: {html_sample}")
+        # print(f"Sample of HTML content: {html_sample}")
         
         # Check HTML file size
         html_size = os.path.getsize(html_path)
-        print(f"HTML file size: {html_size} bytes")
+        # print(f"HTML file size: {html_size} bytes")
         
-        if html_size < 10000:  # If file is too small, something might be wrong
-            print("WARNING: HTML file is very small! It might not contain all necessary data.")
-            
     except Exception as e:
         print(f"Error creating animated GIF visualization: {e}")
         import traceback
@@ -961,33 +958,46 @@ def create_animated_gif_visualization(features_df, gif_paths, output_dir, dim_re
     return html_path
 
 def extract_max_slices_simple(volume):
-    """Simple function to get center slices of a volume."""
+    """Find slice indices where the cleft mask (channel-2) has the most voxels.
+
+    Returns a dict: {'xy': z_idx, 'xz': y_idx, 'yz': x_idx}
+    """
     try:
         # Convert to numpy if it's a tensor
-        if hasattr(volume, 'numpy'):
-            volume = volume.numpy()
-        elif torch.is_tensor(volume):
+        if torch.is_tensor(volume):
             volume = volume.detach().cpu().numpy()
-        
-        # Ensure volume is 3D
-        if volume.ndim == 4:
-            volume = volume[0]  # Remove batch dimension if present
-        if volume.ndim == 2:
-            return None  # Can't process 2D volume
-            
-        # Get center slices
-        z_center, y_center, x_center = np.array(volume.shape) // 2
-        
-        max_slices = {
-            'xy': int(z_center),
-            'xz': int(y_center), 
-            'yz': int(x_center)
+
+        # Ensure 4-D (C, D, H, W)
+        if volume.ndim == 3:
+            # Assume missing channel dim – treat raw only, so no mask available
+            D, H, W = volume.shape
+            mask = np.zeros((D, H, W), dtype=bool)
+        else:
+            mask = volume[2] > 0  # cleft mask channel
+
+        # If mask empty, fallback to centre slice
+        if mask.sum() == 0:
+            D, H, W = mask.shape
+            return {'xy': D // 2, 'xz': H // 2, 'yz': W // 2}
+
+        # Sum along axes
+        z_sums = mask.sum(axis=(1, 2))  # iterate over z (xy view)
+        y_sums = mask.sum(axis=(0, 2))  # iterate over y (xz view)
+        x_sums = mask.sum(axis=(0, 1))  # iterate over x (yz view)
+
+        return {
+            'xy': int(z_sums.argmax()),
+            'xz': int(y_sums.argmax()),
+            'yz': int(x_sums.argmax())
         }
-        return max_slices
-            
     except Exception as e:
-        print(f"Error extracting center slices: {e}")
-        return None
+        print(f"Error extracting max cleft slices: {e}")
+        # Fallback: centre slice
+        if torch.is_tensor(volume):
+            _, D, H, W = volume.shape
+        else:
+            D, H, W = volume.shape[-3:]
+        return {'xy': D // 2, 'xz': H // 2, 'yz': W // 2}
 
 def extract_embeddings_from_checkpoint(checkpoint_path, data_dir='datareal', preproc_dir='preproc_synapses', 
                                      cube_size=80, max_samples=1000, hidden_dim=512, output_dim=128):
@@ -1073,9 +1083,13 @@ def extract_embeddings_from_checkpoint(checkpoint_path, data_dir='datareal', pre
                     sample = dataset[idx]
                     if isinstance(sample, tuple):
                         volume = sample[0]
-                        synapse_name = sample[1] if len(sample) > 1 else f"sample_{idx}"
                     else:
                         volume = sample
+
+                    # True synapse identifier from dataset
+                    try:
+                        synapse_name = dataset.synapse_ids[idx]
+                    except Exception:
                         synapse_name = f"sample_{idx}"
                     
                     # Extract bbox name from synapse name
@@ -1142,9 +1156,9 @@ def main():
                         help='Directory containing preprocessed H5 files')
     parser.add_argument('--output_dir', type=str, default='umap_visualization',
                         help='Output directory for visualization')
-    parser.add_argument('--max_samples', type=int, default=200,
+    parser.add_argument('--max_samples', type=int, default=500,
                         help='Maximum number of samples to process for embeddings')
-    parser.add_argument('--num_samples', type=int, default=200,
+    parser.add_argument('--num_samples', type=int, default=500,
                         help='Number of samples to create GIFs for')
     parser.add_argument('--dim_reduction', type=str, default='umap', choices=['umap', 'tsne'],
                         help='Dimensionality reduction method')
@@ -1385,11 +1399,11 @@ def main():
         
         # Now create visualizations with our simpler methods if we have GIFs
         if gif_paths:                    
-            print("\nCreating animated GIF visualization...")
-            print(f"GIF paths: {list(gif_paths.keys())}")
-            print(f"Features df columns: {features_df.columns.tolist()}")
-            print(f"Features df index range: {features_df.index.min()} to {features_df.index.max()}")
-            print(f"Output directory: {output_dir}")
+            # print("\nCreating animated GIF visualization...")
+            # print(f"GIF paths: {list(gif_paths.keys())}")
+            # print(f"Features df columns: {features_df.columns.tolist()}")
+            # print(f"Features df index range: {features_df.index.min()} to {features_df.index.max()}")
+            # print(f"Output directory: {output_dir}")
             
             try:
                 # Pass max_slices_data to the visualization function

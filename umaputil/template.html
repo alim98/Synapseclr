@@ -176,6 +176,8 @@
     <script>
         // Track whether GIFs are visible
         let gifsVisible = true;
+        // Toggle for WebKnossos links (set to false to disable clicking)
+        const ENABLE_WK_LINKS = false;
 
         // Function to generate WebKnossos URL based on central coordinates and bbox number
         function generateWebknossosUrl(centralCoordX, centralCoordY, centralCoordZ, bboxName) {
@@ -747,6 +749,11 @@
                         return;
                     }
                     
+                    // Disable WebKnossos links if flag is off
+                    if (!ENABLE_WK_LINKS) {
+                        return;
+                    }
+
                     // Prefer pre-computed URL if available
                     const precomputedUrl = gifContainer.dataset.wkUrl;
 
@@ -1116,11 +1123,19 @@
                 document.querySelectorAll('.cluster-checkbox:checked').forEach(cb => {
                     selectedFilters.push(cb.value);
                 });
+                // If none selected, treat as all clusters selected
+                if (selectedFilters.length === 0) {
+                    document.querySelectorAll('.cluster-checkbox').forEach(cb => selectedFilters.push(cb.value));
+                }
                 console.log("Selected clusters:", selectedFilters);
             } else {
                 document.querySelectorAll('.bbox-checkbox:checked').forEach(cb => {
                     selectedFilters.push(cb.value);
                 });
+                // If none selected, treat as all bboxes selected
+                if (selectedFilters.length === 0) {
+                    document.querySelectorAll('.bbox-checkbox').forEach(cb => selectedFilters.push(cb.value));
+                }
                 console.log("Selected bboxes:", selectedFilters);
             }
             

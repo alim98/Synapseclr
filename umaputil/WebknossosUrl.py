@@ -49,7 +49,7 @@ def calculate_bbox_coordinates(central_coord_x, central_coord_y, central_coord_z
     return x1, y1, z1
 
 
-# calculate_bbox_coordinates(402,378,441,7)
+calculate_bbox_coordinates(402,378,441,7)
 # # # calculate_bbox_coordinates(357,330,268,6)
 # # calculate_bbox_coordinates(334,127,210,5)
 # calculate_bbox_coordinates(442,202,345,2)
