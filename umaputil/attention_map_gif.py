@@ -20,12 +20,14 @@ from models.simclr3d import SimCLR
 from umaputil.GifUmap import initialize_synapse_dataset
 
 
-def compute_saliency_map(model: SimCLR, volume: torch.Tensor) -> torch.Tensor:
+def compute_saliency_map(model: SimCLR, volume: torch.Tensor, threshold: float = 0.1, power: float = 1.5) -> torch.Tensor:
     """Compute absolute gradient saliency map for a single volume.
 
     Args:
         model: Trained SimCLR model.
         volume: Tensor of shape (C, D, H, W) in range [0, 1] or [0, 255].
+        threshold: Minimum threshold for attention values (0-1). Values below this are set to 0.
+        power: Power to apply to normalized gradients to enhance high attention areas.
 
     Returns:
         saliency: Tensor of shape (D, H, W) in range [0, 1].
@@ -41,35 +43,63 @@ def compute_saliency_map(model: SimCLR, volume: torch.Tensor) -> torch.Tensor:
     # gradient w.r.t input
     grad = volume.grad.detach().abs()  # (1, C, D, H, W)
     grad = grad.sum(dim=1).squeeze(0)  # (D, H, W)
+    
     # normalize per volume
     grad = grad / (grad.max() + 1e-8)
+    
+    # Apply threshold to filter out low attention values
+    grad = torch.where(grad >= threshold, grad, torch.zeros_like(grad))
+    
+    # Re-normalize after thresholding
+    if grad.max() > 0:
+        grad = grad / grad.max()
+    
+    # Apply power transformation to enhance high attention areas
+    grad = grad.pow(power)
+    
     return grad
 
 
-def overlay_heatmap(raw_slice: np.ndarray, heat_slice: np.ndarray, alpha: float = 0.5) -> np.ndarray:
+def overlay_heatmap(raw_slice: np.ndarray, heat_slice: np.ndarray, alpha: float = 0.7, colormap: str = 'hot') -> np.ndarray:
     """Overlay heatmap on grayscale slice.
 
     Args:
         raw_slice: 2-D uint8 array (H, W).
         heat_slice: 2-D float array in [0, 1] (H, W).
+        alpha: Transparency of heatmap overlay (higher = more visible attention).
+        colormap: Matplotlib colormap name for attention visualization.
 
     Returns:
         3-D uint8 RGB image.
     """
+    # Enhance contrast of the base image
     base = np.stack([raw_slice] * 3, axis=2).astype(np.float32)
-    cmap = plt.get_cmap('jet')
+    base = np.clip(base * 0.8, 0, 255)  # Darken base slightly to make overlay more visible
+    
+    # Use a more vibrant colormap for attention
+    cmap = plt.get_cmap(colormap)
     heat_color = (cmap(heat_slice)[:, :, :3] * 255).astype(np.float32)
-    blended = np.clip((1 - alpha) * base + alpha * heat_color, 0, 255).astype(np.uint8)
-    return blended
+    
+    # Create mask for areas with attention
+    attention_mask = heat_slice > 0
+    
+    # Apply overlay only where there is attention
+    blended = base.copy()
+    blended[attention_mask] = (1 - alpha) * base[attention_mask] + alpha * heat_color[attention_mask]
+    
+    return np.clip(blended, 0, 255).astype(np.uint8)
 
 
-def create_attention_gif(volume: torch.Tensor, saliency: torch.Tensor, output_path: Path, fps: int = 10):
+def create_attention_gif(volume: torch.Tensor, saliency: torch.Tensor, output_path: Path, fps: int = 10, alpha: float = 0.7, colormap: str = 'hot'):
     """Create gif with attention overlay.
 
     Args:
         volume: (C, D, H, W) tensor.
         saliency: (D, H, W) tensor in [0, 1].
         output_path: Path to save gif.
+        fps: Frames per second for the GIF.
+        alpha: Transparency of heatmap overlay.
+        colormap: Matplotlib colormap for attention visualization.
     """
     # ensure raw channel 0 is uint8
     vol_np = volume[0].cpu().numpy()
@@ -84,7 +114,7 @@ def create_attention_gif(volume: torch.Tensor, saliency: torch.Tensor, output_pa
     for z in range(vol_np.shape[0]):
         raw_slice = vol_np[z]
         heat_slice = sal_np[z]
-        frame = overlay_heatmap(raw_slice, heat_slice)
+        frame = overlay_heatmap(raw_slice, heat_slice, alpha=alpha, colormap=colormap)
         frames.append(frame)
 
     imageio.mimsave(output_path, frames, fps=fps)
@@ -150,6 +180,14 @@ def main():
     parser.add_argument('--output_dir', type=str, default='attention_gifs', help='Directory to save output GIFs')
     parser.add_argument('--cube_size', type=int, default=80)
     parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu')
+    
+    # Attention visualization parameters
+    parser.add_argument('--threshold', type=float, default=0.1, help='Minimum threshold for attention values (0-1). Lower values show more attention.')
+    parser.add_argument('--power', type=float, default=1.5, help='Power to enhance high attention areas. Higher values make strong attention more prominent.')
+    parser.add_argument('--alpha', type=float, default=0.7, help='Transparency of attention overlay (0-1). Higher values make attention more visible.')
+    parser.add_argument('--colormap', type=str, default='hot', choices=['hot', 'jet', 'plasma', 'viridis', 'inferno'], 
+                        help='Colormap for attention visualization')
+    
     args = parser.parse_args()
 
     output_dir = Path(args.output_dir)
@@ -188,12 +226,14 @@ def main():
         print('No samples found.')
         return
 
+    print(f"Using visualization parameters: threshold={args.threshold}, power={args.power}, alpha={args.alpha}, colormap={args.colormap}")
+
     for bbox_name, syn_id in samples_by_bbox.items():
         cube = dataset.synapse_cubes[syn_id].to(args.device)
-        saliency = compute_saliency_map(model, cube)
+        saliency = compute_saliency_map(model, cube, threshold=args.threshold, power=args.power)
         gif_path = output_dir / f"{bbox_name}_{syn_id}_attention.gif"
         print(f"Creating attention GIF for {syn_id} -> {gif_path}")
-        create_attention_gif(cube.cpu(), saliency.cpu(), gif_path)
+        create_attention_gif(cube.cpu(), saliency.cpu(), gif_path, alpha=args.alpha, colormap=args.colormap)
 
 
 if __name__ == '__main__':

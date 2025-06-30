@@ -1,0 +1,52 @@
+bbox,synapse_id,region,distance
+bbox1,bbox1_non_spine_synapse_001,postsynapse,0.010370492935180664
+bbox1,bbox1_non_spine_synapse_001,presynapse,0.05964827537536621
+bbox1,bbox1_non_spine_synapse_001,cleft,0.03863722085952759
+bbox2,bbox2_explorative_2024-08-28_Cora_Wolter_003,postsynapse,0.00625920295715332
+bbox2,bbox2_explorative_2024-08-28_Cora_Wolter_003,presynapse,0.09799093008041382
+bbox2,bbox2_explorative_2024-08-28_Cora_Wolter_003,cleft,0.014400720596313477
+bbox3,bbox3_non_spine_synapse_001,postsynapse,0.035249173641204834
+bbox3,bbox3_non_spine_synapse_001,presynapse,0.023962318897247314
+bbox3,bbox3_non_spine_synapse_001,cleft,0.005767941474914551
+bbox4,bbox4_explorative_2024-08-03_Ali_Karimi_001,postsynapse,0.010846436023712158
+bbox4,bbox4_explorative_2024-08-03_Ali_Karimi_001,presynapse,0.045384764671325684
+bbox4,bbox4_explorative_2024-08-03_Ali_Karimi_001,cleft,0.09346538782119751
+bbox5,bbox5_non_spine_synapse_001,postsynapse,0.011445760726928711
+bbox5,bbox5_non_spine_synapse_001,presynapse,0.08250868320465088
+bbox5,bbox5_non_spine_synapse_001,cleft,0.004135072231292725
+bbox6,bbox6_non_spine_synapse_023,postsynapse,0.018917441368103027
+bbox6,bbox6_non_spine_synapse_023,presynapse,0.05019444227218628
+bbox6,bbox6_non_spine_synapse_023,cleft,0.0011740326881408691
+bbox7,bbox7_non_spine_synapse_001,postsynapse,0.020761430263519287
+bbox7,bbox7_non_spine_synapse_001,presynapse,0.04894739389419556
+bbox7,bbox7_non_spine_synapse_001,cleft,0.015814661979675293
+
+[bbox bbox1] bbox1_non_spine_synapse_001: Masked postsynapse -> cos distance = 0.0104
+[bbox bbox1] bbox1_non_spine_synapse_001: Masked presynapse  -> cos distance = 0.0596
+[bbox bbox1] bbox1_non_spine_synapse_001: Masked cleft       -> cos distance = 0.0386
+[bbox bbox2] bbox2_explorative_2024-08-28_Cora_Wolter_003: Masked postsynapse -> cos distance = 0.0063
+[bbox bbox2] bbox2_explorative_2024-08-28_Cora_Wolter_003: Masked presynapse  -> cos distance = 0.0980
+[bbox bbox2] bbox2_explorative_2024-08-28_Cora_Wolter_003: Masked cleft       -> cos distance = 0.0144
+[bbox bbox3] bbox3_non_spine_synapse_001: Masked postsynapse -> cos distance = 0.0352
+[bbox bbox3] bbox3_non_spine_synapse_001: Masked presynapse  -> cos distance = 0.0240
+[bbox bbox3] bbox3_non_spine_synapse_001: Masked cleft       -> cos distance = 0.0058
+[bbox bbox4] bbox4_explorative_2024-08-03_Ali_Karimi_001: Masked postsynapse -> cos distance = 0.0108
+[bbox bbox4] bbox4_explorative_2024-08-03_Ali_Karimi_001: Masked presynapse  -> cos distance = 0.0454
+[bbox bbox4] bbox4_explorative_2024-08-03_Ali_Karimi_001: Masked cleft       -> cos distance = 0.0935
+[bbox bbox5] bbox5_non_spine_synapse_001: Masked postsynapse -> cos distance = 0.0114
+[bbox bbox5] bbox5_non_spine_synapse_001: Masked presynapse  -> cos distance = 0.0825
+[bbox bbox5] bbox5_non_spine_synapse_001: Masked cleft       -> cos distance = 0.0041
+[bbox bbox6] bbox6_non_spine_synapse_023: Masked postsynapse -> cos distance = 0.0189
+[bbox bbox6] bbox6_non_spine_synapse_023: Masked presynapse  -> cos distance = 0.0502
+[bbox bbox6] bbox6_non_spine_synapse_023: Masked cleft       -> cos distance = 0.0012
+[bbox bbox7] bbox7_non_spine_synapse_001: Masked postsynapse -> cos distance = 0.0208
+[bbox bbox7] bbox7_non_spine_synapse_001: Masked presynapse  -> cos distance = 0.0489
+[bbox bbox7] bbox7_non_spine_synapse_001: Masked cleft       -> cos distance = 0.0158
+
+
+Average embedding change per region:
+region
+presynapse     0.058377
+cleft          0.024771
+postsynapse    0.016264
+

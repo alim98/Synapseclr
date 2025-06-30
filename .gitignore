@@ -13,3 +13,4 @@ preproc_synapses/*
 final_synapse_visualizationfinal/*
 .git-credentials
 .git-credentials
+umap_visualization/*

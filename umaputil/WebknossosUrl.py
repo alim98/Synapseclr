@@ -10,6 +10,7 @@ def calculate_bbox_coordinates(central_coord_x, central_coord_y, central_coord_z
     Returns:
         tuple: (x1, y1, z1) coordinates for bbox
     """
+
     # Get base coordinates based on bounding box number
     if bb_num == 6:
         x1 = 16700 - 100 + central_coord_x

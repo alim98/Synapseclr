@@ -708,6 +708,29 @@ def create_animated_gif_visualization(features_df, gif_paths, output_dir, dim_re
                 b = random.randint(0, 255)
                 bbox_colors[bbox] = f"rgb({r}, {g}, {b})"
     
+    # -------------------------------------------------------------------
+    # Pre-compute WebKnossos URLs (needs samples_with_gifs)
+    # -------------------------------------------------------------------
+    wk_urls = {}
+    try:
+        from umaputil.WebknossosUrl import calculate_bbox_coordinates as _calc_wk
+    except Exception:
+        _calc_wk = None
+
+    if _calc_wk is not None:
+        for sample in samples_with_gifs:
+            bbox_name = sample.get('bbox', 'unknown')
+            if isinstance(bbox_name, str) and bbox_name.startswith('bbox'):
+                bb_num = int(bbox_name.replace('bbox', ''))
+                cx = int(sample.get('central_coord_1', 40))
+                cy = int(sample.get('central_coord_2', 40))
+                cz = int(sample.get('central_coord_3', 40))
+                try:
+                    _x1, _y1, _z1 = _calc_wk(cx, cy, cz, bb_num)
+                    wk_urls[sample['id']] = f"https://webknossos.brain.mpg.de/annotations/67bcfa0301000006202da79c#{_x1},{_y1},{_z1},0,0.905,1506"
+                except Exception as e:
+                    print(f"WK URL calculation failed for sample {sample['id']}: {e}")
+
     # Generate HTML content for data points
     points_content = ""
     for idx, row in features_df.iterrows():
@@ -802,7 +825,8 @@ def create_animated_gif_visualization(features_df, gif_paths, output_dir, dim_re
             "central_coord_3": {sample.get('central_coord_3', 0)},
             "gifData": "{sample['gifData']}",
             "hasFrames": {str(has_frames).lower()},
-            "max_slices": {max_slices_json}
+            "max_slices": {max_slices_json},
+            "wk_url": "{wk_urls.get(sample.get('id'), '')}"
         }},"""
     
     # Count how many valid GIFs we have
@@ -846,6 +870,25 @@ def create_animated_gif_visualization(features_df, gif_paths, output_dir, dim_re
     print(f"Has any frames: {has_any_frames}")
     print(f"frames_content length: {len(frames_content)}")
     
+    # -------------------------------------------------------------------
+    # Ensure bbox_name and central coordinates columns exist early
+    # -------------------------------------------------------------------
+    if 'bbox_name' not in features_df.columns:
+        import re
+        def _derive_bbox(name):
+            m = re.match(r'(bbox\d+)', str(name))
+            return m.group(1) if m else 'unknown'
+        if 'synapse_name' in features_df.columns:
+            features_df['bbox_name'] = features_df['synapse_name'].apply(_derive_bbox)
+        elif 'Var1' in features_df.columns:
+            features_df['bbox_name'] = features_df['Var1'].apply(_derive_bbox)
+        else:
+            features_df['bbox_name'] = features_df.index.map(lambda x: _derive_bbox(x))
+
+    for col in ['central_coord_1', 'central_coord_2', 'central_coord_3']:
+        if col not in features_df.columns:
+            features_df[col] = 40  # default cube center
+
     # Read the HTML template
     template_path = os.path.join(os.path.dirname(__file__), "template.html")
     try:
@@ -1099,9 +1142,9 @@ def main():
                         help='Directory containing preprocessed H5 files')
     parser.add_argument('--output_dir', type=str, default='umap_visualization',
                         help='Output directory for visualization')
-    parser.add_argument('--max_samples', type=int, default=1000,
+    parser.add_argument('--max_samples', type=int, default=200,
                         help='Maximum number of samples to process for embeddings')
-    parser.add_argument('--num_samples', type=int, default=50,
+    parser.add_argument('--num_samples', type=int, default=200,
                         help='Number of samples to create GIFs for')
     parser.add_argument('--dim_reduction', type=str, default='umap', choices=['umap', 'tsne'],
                         help='Dimensionality reduction method')

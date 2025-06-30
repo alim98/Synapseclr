@@ -730,6 +730,11 @@
                     gifContainer.dataset.maxSlices = JSON.stringify(sample.max_slices);
                 }
                 
+                // Add pre-computed WebKnossos URL if provided
+                if (sample.wk_url) {
+                    gifContainer.dataset.wkUrl = sample.wk_url;
+                }
+                
                 // Create image
                 const gifImg = document.createElement('img');
                 gifImg.src = `data:image/gif;base64,${sample.gifData}`;
@@ -742,12 +747,23 @@
                         return;
                     }
                     
-                    // Generate URL
+                    // Prefer pre-computed URL if available
+                    const precomputedUrl = gifContainer.dataset.wkUrl;
+
+                    if (precomputedUrl) {
+                        gifContainer.style.borderColor = '#4CAF50';
+                        setTimeout(() => {
+                            window.open(precomputedUrl, '_blank');
+                        }, 150);
+                        return;
+                    }
+
+                    // Otherwise fall back to computing from central coordinates
                     const centralCoordX = parseInt(gifContainer.dataset.centralCoord1);
                     const centralCoordY = parseInt(gifContainer.dataset.centralCoord2);
                     const centralCoordZ = parseInt(gifContainer.dataset.centralCoord3);
                     const bboxName = gifContainer.dataset.bbox;
-                    
+
                     if (centralCoordX && centralCoordY && centralCoordZ && bboxName) {
                         const url = generateWebknossosUrl(centralCoordX, centralCoordY, centralCoordZ, bboxName);
                         if (url) {

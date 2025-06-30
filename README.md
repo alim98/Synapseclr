@@ -1,7 +1,7 @@
 # SimCLR for Synaptic EM Data
 ⚡ main ~ python train_synapse_simclr.py --data_dir datareal --epochs 10 --batch_size 8 --cube_size 80 --run_name my_experimentssss
 
-python train_synapse_simclr.py --data_dir datareal --epochs 200 --batch_size 8 --run_name enhanced_training_constant_lr --scheduler_type constant
+python train_synapse_simclr.py --data_dir datareal --epochs 600 --batch_size 8 --run_name enhanced_training_constant_lr --scheduler_type constant
 This project implements SimCLR self-supervised learning for 3D electron microscopy (EM) data of synapses, following the approach described in [Chen et al., 2020](https://arxiv.org/abs/2002.05709) with adaptations for 3D volumetric data.
 
 ## Project Overview
