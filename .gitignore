@@ -14,3 +14,4 @@ final_synapse_visualizationfinal/*
 .git-credentials
 .git-credentials
 umap_visualization/*
+*.tar.gz

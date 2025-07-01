@@ -1,3 +1,7 @@
+# python umaputil/attention_map_gif.py \
+#   --checkpoint checkpoints/checkpoint_latest.pt \
+#   --hidden_dim 512 \
+#   --out_dim 128          # <- matches the checkpoint's projector.net.6 layer
 # Add project root to sys.path BEFORE other imports
 import sys
 from pathlib import Path
@@ -15,12 +19,13 @@ import matplotlib.pyplot as plt
 import imageio
 from tqdm import tqdm
 from typing import Any, Dict
+import torch.nn.functional as F  # For optional smoothing
 
 from models.simclr3d import SimCLR
 from umaputil.GifUmap import initialize_synapse_dataset
 
 
-def compute_saliency_map(model: SimCLR, volume: torch.Tensor, threshold: float = 0.1, power: float = 1.5) -> torch.Tensor:
+def compute_saliency_map(model: SimCLR, volume: torch.Tensor, threshold: float = 0.05, power: float = 2.0, smooth_kernel: int = 5) -> torch.Tensor:
     """Compute absolute gradient saliency map for a single volume.
 
     Args:
@@ -28,6 +33,7 @@ def compute_saliency_map(model: SimCLR, volume: torch.Tensor, threshold: float =
         volume: Tensor of shape (C, D, H, W) in range [0, 1] or [0, 255].
         threshold: Minimum threshold for attention values (0-1). Values below this are set to 0.
         power: Power to apply to normalized gradients to enhance high attention areas.
+        smooth_kernel: Kernel size (in voxels) for 3-D mean filtering of the saliency map. 1 disables smoothing.
 
     Returns:
         saliency: Tensor of shape (D, H, W) in range [0, 1].
@@ -54,13 +60,22 @@ def compute_saliency_map(model: SimCLR, volume: torch.Tensor, threshold: float =
     if grad.max() > 0:
         grad = grad / grad.max()
     
+    # Optional 3-D smoothing (simple mean filter) to reduce speckle noise
+    if smooth_kernel and smooth_kernel > 1:
+        # Pad so dimensions stay unchanged
+        pad = smooth_kernel // 2
+        grad = F.avg_pool3d(grad.unsqueeze(0).unsqueeze(0),
+                             kernel_size=smooth_kernel,
+                             stride=1,
+                             padding=pad).squeeze()
+    
     # Apply power transformation to enhance high attention areas
     grad = grad.pow(power)
     
     return grad
 
 
-def overlay_heatmap(raw_slice: np.ndarray, heat_slice: np.ndarray, alpha: float = 0.7, colormap: str = 'hot') -> np.ndarray:
+def overlay_heatmap(raw_slice: np.ndarray, heat_slice: np.ndarray, alpha: float = 0.6, colormap: str = 'inferno') -> np.ndarray:
     """Overlay heatmap on grayscale slice.
 
     Args:
@@ -90,7 +105,7 @@ def overlay_heatmap(raw_slice: np.ndarray, heat_slice: np.ndarray, alpha: float 
     return np.clip(blended, 0, 255).astype(np.uint8)
 
 
-def create_attention_gif(volume: torch.Tensor, saliency: torch.Tensor, output_path: Path, fps: int = 10, alpha: float = 0.7, colormap: str = 'hot'):
+def create_attention_gif(volume: torch.Tensor, saliency: torch.Tensor, output_path: Path, fps: int = 10, alpha: float = 0.6, colormap: str = 'inferno'):
     """Create gif with attention overlay.
 
     Args:
@@ -182,11 +197,19 @@ def main():
     parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu')
     
     # Attention visualization parameters
-    parser.add_argument('--threshold', type=float, default=0.1, help='Minimum threshold for attention values (0-1). Lower values show more attention.')
-    parser.add_argument('--power', type=float, default=1.5, help='Power to enhance high attention areas. Higher values make strong attention more prominent.')
-    parser.add_argument('--alpha', type=float, default=0.7, help='Transparency of attention overlay (0-1). Higher values make attention more visible.')
-    parser.add_argument('--colormap', type=str, default='hot', choices=['hot', 'jet', 'plasma', 'viridis', 'inferno'], 
+    parser.add_argument('--threshold', type=float, default=0.05, help='Minimum threshold for attention values (0-1). Lower values show more attention.')
+    parser.add_argument('--power', type=float, default=0.5, help='Power to enhance high attention areas. Higher values make strong attention more prominent.')
+    parser.add_argument('--alpha', type=float, default=0.4, help='Transparency of attention overlay (0-1). Higher values make attention more visible.')
+    parser.add_argument('--colormap', type=str, default='inferno', choices=['hot', 'jet', 'plasma', 'viridis', 'inferno', 'turbo'], 
                         help='Colormap for attention visualization')
+    parser.add_argument('--smooth_kernel', type=int, default=5,
+                        help='Kernel size (in voxels) for 3-D mean filtering of the saliency map. 1 disables smoothing.')
+    
+    # Model architecture parameters (should match training)
+    parser.add_argument('--hidden_dim', type=int, default=512,
+                        help='Hidden dimension of the projection MLP. Must match value used during training.')
+    parser.add_argument('--out_dim', type=int, default=128,
+                        help='Output embedding dimension of the projection head.')
     
     args = parser.parse_args()
 
@@ -197,7 +220,7 @@ def main():
     checkpoint = safe_torch_load(args.checkpoint, map_location=args.device)
     state = get_state_dict(checkpoint)
 
-    model = SimCLR(in_channels=3, pretrained=False)
+    model = SimCLR(in_channels=3, hidden_dim=args.hidden_dim, out_dim=args.out_dim, pretrained=False)
     compat_state = filter_compatible_keys(state, model)
     missing, unexpected = model.load_state_dict(compat_state, strict=False)
     if missing:
@@ -230,7 +253,10 @@ def main():
 
     for bbox_name, syn_id in samples_by_bbox.items():
         cube = dataset.synapse_cubes[syn_id].to(args.device)
-        saliency = compute_saliency_map(model, cube, threshold=args.threshold, power=args.power)
+        saliency = compute_saliency_map(model, cube,
+                                       threshold=args.threshold,
+                                       power=args.power,
+                                       smooth_kernel=args.smooth_kernel)
         gif_path = output_dir / f"{bbox_name}_{syn_id}_attention.gif"
         print(f"Creating attention GIF for {syn_id} -> {gif_path}")
         create_attention_gif(cube.cpu(), saliency.cpu(), gif_path, alpha=args.alpha, colormap=args.colormap)
